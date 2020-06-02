@@ -148,7 +148,7 @@ class DataFrame(_Frame, dd.core.DataFrame):
         on = kwargs.pop("on", None)
         if isinstance(on, tuple):
             on = list(on)
-        return super().merge(other, on=on, shuffle="tasks", **kwargs)
+        return super().merge(other, on=on, shuffle="dynamic-tasks", **kwargs)
 
     def join(self, other, **kwargs):
         if kwargs.pop("shuffle", "tasks") != "tasks":
@@ -165,7 +165,7 @@ class DataFrame(_Frame, dd.core.DataFrame):
         on = kwargs.pop("on", None)
         if isinstance(on, tuple):
             on = list(on)
-        return super().join(other, how=how, on=on, shuffle="tasks", **kwargs)
+        return super().join(other, how=how, on=on, shuffle="dynamic-tasks", **kwargs)
 
     def set_index(self, other, sorted=False, divisions=None, **kwargs):
         if kwargs.pop("shuffle", "tasks") != "tasks":
@@ -228,7 +228,7 @@ class DataFrame(_Frame, dd.core.DataFrame):
         return super().set_index(
             other,
             sorted=pre_sorted,
-            shuffle="tasks",
+            shuffle="dynamic-tasks",
             divisions=divisions,
             **kwargs,
         )
