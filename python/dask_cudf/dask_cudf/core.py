@@ -18,12 +18,27 @@ from dask.highlevelgraph import HighLevelGraph
 from dask.optimization import cull, fuse
 from dask.utils import M, OperatorMethodMixin, derived_from, funcname
 
+from dask_cuda.explicit_comms import (
+    CommsContext,
+    dataframe_merge,
+    default_comms,
+)
+
 import cudf
 from cudf import _lib as libcudf
 
 from dask_cudf import sorting
 
 DASK_VERSION = LooseVersion(dask.__version__)
+
+_USE_EXPLICIT_COMMS = None
+
+
+def use_explicit_comms():
+    global _USE_EXPLICIT_COMMS
+    if _USE_EXPLICIT_COMMS is None:
+        _USE_EXPLICIT_COMMS = dask.config.get("use-explicit-comms", False)
+    return _USE_EXPLICIT_COMMS
 
 
 def optimize(dsk, keys, **kwargs):
@@ -40,7 +55,7 @@ def optimize(dsk, keys, **kwargs):
 
 
 class _Frame(dd.core._Frame, OperatorMethodMixin):
-    """ Superclass for DataFrame and Series
+    """Superclass for DataFrame and Series
 
     Parameters
     ----------
@@ -136,6 +151,7 @@ class DataFrame(_Frame, dd.core.DataFrame):
         )
 
     def merge(self, other, **kwargs):
+        print("cuDF merge! - ", kwargs)
         if kwargs.pop("shuffle", "tasks") != "tasks":
             raise ValueError(
                 "Dask-cudf only supports task based shuffling, got %s"
@@ -144,9 +160,21 @@ class DataFrame(_Frame, dd.core.DataFrame):
         on = kwargs.pop("on", None)
         if isinstance(on, tuple):
             on = list(on)
+
+        if (
+            kwargs.get("how", "inner") == "inner"
+            and (
+                kwargs.get("on")
+                or kwargs.get("left_on")
+                or kwargs.get("right_on")
+            )
+            and use_explicit_comms()
+        ):
+            return dataframe_merge(self, other, on=on, **kwargs)
         return super().merge(other, on=on, shuffle="tasks", **kwargs)
 
     def join(self, other, **kwargs):
+        print("cuDF join!")
         if kwargs.pop("shuffle", "tasks") != "tasks":
             raise ValueError(
                 "Dask-cudf only supports task based shuffling, got %s"
@@ -309,7 +337,7 @@ class DataFrame(_Frame, dd.core.DataFrame):
             return handle_out(out, result)
 
     def repartition(self, *args, **kwargs):
-        """ Wraps dask.dataframe DataFrame.repartition method.
+        """Wraps dask.dataframe DataFrame.repartition method.
         Uses DataFrame.shuffle if `columns=` is specified.
         """
         # TODO: Remove this function in future(0.17 release)
@@ -328,11 +356,12 @@ class DataFrame(_Frame, dd.core.DataFrame):
             return self.shuffle(
                 on=columns, ignore_index=ignore_index, **kwargs
             )
+        print("cuDF repartition!")
         return super().repartition(*args, **kwargs)
 
     def shuffle(self, *args, **kwargs):
-        """ Wraps dask.dataframe DataFrame.shuffle method
-        """
+        """Wraps dask.dataframe DataFrame.shuffle method"""
+        print("cuDF shuffle!")
         shuffle_arg = kwargs.pop("shuffle", None)
         if shuffle_arg and shuffle_arg != "tasks":
             raise ValueError("dask_cudf does not support disk-based shuffle.")
