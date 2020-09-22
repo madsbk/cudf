@@ -21,7 +21,7 @@ from dask.utils import M, OperatorMethodMixin, derived_from, funcname
 from dask_cuda.explicit_comms import (
     CommsContext,
     dataframe_merge,
-    default_comms,
+    dataframe_shuffle,
 )
 
 import cudf
@@ -359,13 +359,24 @@ class DataFrame(_Frame, dd.core.DataFrame):
         print("cuDF repartition!")
         return super().repartition(*args, **kwargs)
 
-    def shuffle(self, *args, **kwargs):
+    def shuffle(
+        self,
+        on,
+        npartitions=None,
+        max_branch=None,
+        shuffle=None,
+        ignore_index=False,
+        compute=None,
+    ):
         """Wraps dask.dataframe DataFrame.shuffle method"""
         print("cuDF shuffle!")
-        shuffle_arg = kwargs.pop("shuffle", None)
-        if shuffle_arg and shuffle_arg != "tasks":
+        if shuffle and shuffle != "tasks":
             raise ValueError("dask_cudf does not support disk-based shuffle.")
-        return super().shuffle(*args, shuffle="tasks", **kwargs)
+
+        if ignore_index and use_explicit_comms():
+            return dataframe_shuffle(self, on, npartitions)
+
+        return super().shuffle(on, npartitions, max_branch, shuffle, ignore_index, compute)
 
     def groupby(self, by=None, **kwargs):
         from .groupby import CudfDataFrameGroupBy
