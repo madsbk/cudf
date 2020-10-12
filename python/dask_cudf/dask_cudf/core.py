@@ -151,7 +151,6 @@ class DataFrame(_Frame, dd.core.DataFrame):
         )
 
     def merge(self, other, **kwargs):
-        print("cuDF merge! - ", kwargs)
         if kwargs.pop("shuffle", "tasks") != "tasks":
             raise ValueError(
                 "Dask-cudf only supports task based shuffling, got %s"
@@ -170,11 +169,13 @@ class DataFrame(_Frame, dd.core.DataFrame):
             )
             and use_explicit_comms()
         ):
+            print("cuDF merge using explicit comms! - ", kwargs)
             return dataframe_merge(self, other, on=on, **kwargs)
+        print("cuDF merge using no explicit comms! - ", kwargs)
         return super().merge(other, on=on, shuffle="tasks", **kwargs)
 
     def join(self, other, **kwargs):
-        print("cuDF join!")
+        print("cuDF join no explicit comms!")
         if kwargs.pop("shuffle", "tasks") != "tasks":
             raise ValueError(
                 "Dask-cudf only supports task based shuffling, got %s"
@@ -271,6 +272,7 @@ class DataFrame(_Frame, dd.core.DataFrame):
         set_divisions=False,
         **kwargs,
     ):
+        print("sort_values() -  no explicit-comms")
         if self.npartitions == 1:
             df = self.map_partitions(M.sort_values, by)
         else:
@@ -356,7 +358,7 @@ class DataFrame(_Frame, dd.core.DataFrame):
             return self.shuffle(
                 on=columns, ignore_index=ignore_index, **kwargs
             )
-        print("cuDF repartition!")
+        print("cuDF repartition (no explicit comms)!")
         return super().repartition(*args, **kwargs)
 
     def shuffle(
@@ -369,13 +371,15 @@ class DataFrame(_Frame, dd.core.DataFrame):
         compute=None,
     ):
         """Wraps dask.dataframe DataFrame.shuffle method"""
-        print("cuDF shuffle!")
+
         if shuffle and shuffle != "tasks":
             raise ValueError("dask_cudf does not support disk-based shuffle.")
 
         if ignore_index and use_explicit_comms():
+            print("cuDF shuffle using explicit_comms!")
             return dataframe_shuffle(self, on, npartitions)
 
+        print("cuDF shuffle no explicit_comms!")
         return super().shuffle(on, npartitions, max_branch, shuffle, ignore_index, compute)
 
     def groupby(self, by=None, **kwargs):
