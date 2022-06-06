@@ -1,6 +1,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION.
 
 
+import gc
 import warnings
 
 import pytest
@@ -30,6 +31,7 @@ def manager(request):
         try:
             yield global_manager.reset(SpillManager(**kwargs))
         finally:
+            gc.collect()
             global_manager.clear()
 
 
@@ -180,11 +182,13 @@ def test_lookup_address_range(manager: SpillManager):
     assert manager.lookup_address_range(buf.ptr - buf.size, buf.size) is None
 
 
-def test_spilling_df_views():
+def test_spilling_df_views(manager):
     df = gen_df()
-    assert gen_df.is_spillable(df)
-    gen_df.buffer(df).move_inplace(target="cpu")
-    assert gen_df.is_spilled(df)
     df_view = df.loc[1:]
-    assert not gen_df.is_spillable(df_view)
-    assert not gen_df.is_spillable(df)
+    buffers = manager.base_buffers()
+    (buf,) = buffers
+    assert len(buffers) == 1
+    buf.move_inplace(target="cpu")
+    assert manager.spilled_and_unspilled() == (gen_df.buffer_size, 0)
+    df_view.abs()
+    assert manager.spilled_and_unspilled() == (0, gen_df.buffer_size)
