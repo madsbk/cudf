@@ -70,7 +70,7 @@ cdef class AccessCounter:
 
 ctypedef vector[shared_ptr[void]] OwnersVecT  # Type aliasing
 
-cdef void* get_data_ptr(buf, shared_ptr[OwnersVecT] owners):
+cdef void* get_data_ptr(buf, shared_ptr[OwnersVecT] owners) except *:
     """
     Retrieve the raw data pointer of `buf`. If adds an owner reference
     to `owners`.
@@ -281,21 +281,21 @@ cdef class Column:
             if mask.size < mask_size:
                 dbuf = rmm.DeviceBuffer(size=mask_size)
                 dbuf.copy_from_device(value)
-                mask = Buffer(dbuf, sole_owner=True)
+                mask = Buffer(dbuf)
         elif hasattr(value, "__array_interface__"):
             value = np.asarray(value).view("u1")[:mask_size]
             if value.size < required_num_bytes:
                 raise ValueError(error_msg.format(str(value.size)))
             dbuf = rmm.DeviceBuffer(size=mask_size)
             dbuf.copy_from_host(value)
-            mask = Buffer(dbuf, sole_owner=True)
+            mask = Buffer(dbuf)
         elif PyObject_CheckBuffer(value):
             value = np.asarray(value).view("u1")[:mask_size]
             if value.size < required_num_bytes:
                 raise ValueError(error_msg.format(str(value.size)))
             dbuf = rmm.DeviceBuffer(size=mask_size)
             dbuf.copy_from_host(value)
-            mask = Buffer(dbuf, sole_owner=True)
+            mask = Buffer(dbuf)
         else:
             raise TypeError(
                 "Expected a Buffer-like object or None for mask, got "
@@ -500,11 +500,11 @@ cdef class Column:
         cdef column_contents contents = move(c_col.get()[0].release())
 
         data = DeviceBuffer.c_from_unique_ptr(move(contents.data))
-        data = Buffer(data, sole_owner=True, ptr_exposed=data_ptr_exposed)
+        data = Buffer(data, ptr_exposed=data_ptr_exposed)
 
         if has_nulls:
             mask = DeviceBuffer.c_from_unique_ptr(move(contents.null_mask))
-            mask = Buffer(mask, sole_owner=True, ptr_exposed=data_ptr_exposed)
+            mask = Buffer(mask, ptr_exposed=data_ptr_exposed)
             null_count = c_col.get()[0].null_count()
         else:
             mask = None
@@ -562,7 +562,6 @@ cdef class Column:
                         ptr=data_ptr,
                         size=(size+offset) * dtype.itemsize
                     ),
-                    sole_owner=True
                 )
             elif (
                 column_owner and
@@ -577,11 +576,10 @@ cdef class Column:
                     data=data_ptr,
                     size=base_nbytes,
                     owner=data_owner,
-                    sole_owner=False
                 )
         else:
             data = Buffer(
-                rmm.DeviceBuffer(ptr=data_ptr, size=0), sole_owner=True
+                rmm.DeviceBuffer(ptr=data_ptr, size=0)
             )
 
         mask_ptr = <uintptr_t>(cv.null_mask())
@@ -595,14 +593,12 @@ cdef class Column:
                         ptr=mask_ptr,
                         size=bitmask_allocation_size_bytes(size+offset)
                     ),
-                    sole_owner=True
                 )
             else:
                 mask = Buffer(
                     data=mask_ptr,
                     size=bitmask_allocation_size_bytes(base_size),
                     owner=mask_owner,
-                    sole_owner=False
                 )
 
         if cv.has_nulls():

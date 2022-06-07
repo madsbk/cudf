@@ -5,6 +5,7 @@ import functools
 import operator
 import pickle
 import time
+from weakref import WeakSet
 from threading import RLock
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
@@ -31,7 +32,7 @@ def format_bytes(nbytes: int) -> str:
 
 def get_base_buffer(obj: Any) -> Optional[Buffer]:
     if isinstance(obj, Buffer):
-        if obj._sole_owner:
+        if isinstance(obj._owner, rmm.DeviceBuffer):
             return obj
         return get_base_buffer(obj._owner)
     if hasattr(obj, "base_data"):
@@ -68,7 +69,6 @@ class Buffer(Serializable):
     _ptr_desc: dict
     _size: int
     _owner: object
-    _sole_owner: bool
     _access_counter: AccessCounter
     _ptr_exposed: bool
     _last_accessed: float
@@ -79,7 +79,6 @@ class Buffer(Serializable):
         data: Any = None,
         size: int = None,
         owner: object = None,
-        sole_owner: bool = False,
         ptr_exposed: bool = False,
     ):
         from cudf._lib.column import AccessCounter
@@ -87,15 +86,13 @@ class Buffer(Serializable):
 
         self._lock = RLock()
         self._access_counter = AccessCounter()
-        self._sole_owner = sole_owner
         self._ptr_exposed = ptr_exposed
         self._ptr_desc = {"type": "gpu"}
         self._last_accessed = time.monotonic()
+        self._viewers = WeakSet()
 
         if isinstance(data, Buffer):
-            self._ptr = data.ptr
-            self._size = data.size
-            self._owner = owner or data._owner
+            raise TypeError("Cannot do this")
         elif isinstance(data, rmm.DeviceBuffer):
             self._ptr = data.ptr
             self._size = data.size
@@ -123,7 +120,7 @@ class Buffer(Serializable):
                 raise TypeError("data must be Buffer, array-like or integer")
             self._init_from_array_like(np.asarray(data), owner)
 
-        if not self._sole_owner and self._owner is not None:
+        if self._owner is not None:
             base_buffer = get_base_buffer(self._owner)
             if base_buffer is not None:
                 with base_buffer._lock:
@@ -137,18 +134,12 @@ class Buffer(Serializable):
                 base = self._spill_manager.lookup_address_range(
                     self._ptr, self._size
                 )
-                if self._sole_owner:
-                    if base is not None:
-                        raise RuntimeError(
-                            "Creating sole owning buffer of already "
-                            f"known memory {self} {base}"
-                        )
-                elif base:
+                if base:
                     with base._lock:
-                        assert not base.is_spilled
-                        base._ptr_exposed = True
-
-                self._spill_manager.add(self)
+                        base._viewers.add(self)
+                        return
+                else:
+                    self._spill_manager.add(self)
 
     @classmethod
     def from_buffer(cls, buffer: Buffer, size: int = None, offset: int = 0):
@@ -165,11 +156,14 @@ class Buffer(Serializable):
         offset : int, optional
             Start offset relative to `buffer.ptr`.
         """
-
         ret = cls()
-        ret._ptr = buffer.ptr + offset
+        with buffer._lock:
+            buffer.move_inplace(target="gpu")
+        ret._ptr = buffer._ptr + offset
         ret._size = buffer.size if size is None else size
         ret._owner = get_base_buffer(buffer)
+        if ret._owner not in (None, ret):
+            ret._owner._viewers.add(ret)
         return ret
 
     def __len__(self) -> int:
@@ -184,18 +178,20 @@ class Buffer(Serializable):
             ptr_type = self._ptr_desc["type"]
             if ptr_type == target:
                 return
-
-            if not self.spillable:
-                raise ValueError(
-                    f"Cannot in-place move an unspillable buffer: {self}"
-                )
-
             if (ptr_type, target) == ("gpu", "cpu"):
+                if not self.spillable:
+                    raise ValueError(
+                        f"Cannot in-place move an unspillable buffer: {self}"
+                    )
                 host_mem = memoryview(bytearray(self.size))
+                ptr = self._ptr
                 rmm._lib.device_buffer.copy_ptr_to_host(self._ptr, host_mem)
                 self._ptr_desc["memoryview"] = host_mem
                 self._ptr = None
                 self._owner = None
+                for viewer in self._viewers:
+                    viewer._ptr_desc["memoryview"] = host_mem
+                    viewer._ptr_desc["offset"] = (viewer._ptr - ptr)
             elif (ptr_type, target) == ("cpu", "gpu"):
                 dev_mem = rmm.DeviceBuffer.to_device(
                     self._ptr_desc.pop("memoryview")
@@ -203,6 +199,10 @@ class Buffer(Serializable):
                 self._ptr = dev_mem.ptr
                 self._size = dev_mem.size
                 self._owner = dev_mem
+                for viewer in self._viewers:
+                    viewer._ptr_desc.pop("memoryview")
+                    offset = viewer._ptr_desc.pop("offset")
+                    viewer._ptr = self._ptr + offset
             else:
                 # TODO: support moving to disk
                 raise ValueError(f"Unknown target: {target}")
@@ -220,19 +220,18 @@ class Buffer(Serializable):
             return self._ptr
 
     @property
-    def sole_owner(self) -> bool:
-        return self._sole_owner
-
-    @property
     def ptr_exposed(self) -> bool:
         return self._ptr_exposed
 
     @property
     def spillable(self) -> bool:
+        # the viewers should not be "spillable" at all,
+        # but it's convenient to be able to invoke the
+        # .spillable() method on them.
         return (
-            self._sole_owner
-            and not self._ptr_exposed
+            not self._ptr_exposed
             and self._access_counter.use_count() == 1
+            and all(v.spillable for v in self._viewers)
         )
 
     @property
@@ -259,7 +258,7 @@ class Buffer(Serializable):
 
     def to_host_array(self):
         data = np.empty((self.size,), "u1")
-        rmm._lib.device_buffer.copy_ptr_to_host(self.ptr, data)
+        rmm._lib.device_buffer.copy_ptr_to_host(self._ptr, data)
         return data
 
     def _init_from_array_like(self, data, owner):
@@ -285,6 +284,7 @@ class Buffer(Serializable):
             )
 
     def serialize(self) -> Tuple[dict, list]:
+        ptr_exposed = self._ptr_exposed
         header = {}  # type: Dict[Any, Any]
         header["type-serialized"] = pickle.dumps(type(self))
         header["constructor-kwargs"] = {}
@@ -292,6 +292,7 @@ class Buffer(Serializable):
         header["desc"]["strides"] = (1,)
         header["frame_count"] = 1
         frames = [self]
+        self._ptr_exposed = ptr_exposed
         return header, frames
 
     @classmethod
@@ -299,15 +300,15 @@ class Buffer(Serializable):
         assert (
             header["frame_count"] == 1
         ), "Only expecting to deserialize Buffer with a single frame."
-        buf = cls(frames[0], **header["constructor-kwargs"])
-
+        buf = Buffer.from_buffer(frames[0], **header["constructor-kwargs"])
+        ptr_exposed = buf._ptr_exposed
         if header["desc"]["shape"] != buf.__cuda_array_interface__["shape"]:
             raise ValueError(
                 f"Received a `Buffer` with the wrong size."
                 f" Expected {header['desc']['shape']}, "
                 f"but got {buf.__cuda_array_interface__['shape']}"
             )
-
+        buf._ptr_exposed = ptr_exposed
         return buf
 
     @classmethod
@@ -332,10 +333,10 @@ class Buffer(Serializable):
             data_info = str(hex(self._ptr))
         return (
             f"<cudf.core.buffer.Buffer size={format_bytes(self._size)} "
-            f"spillable={self.spillable} sole_owner={self.sole_owner} "
+            f"spillable={self.spillable} "
             f"ptr_exposed={self.ptr_exposed} "
             f"access_counter={self._access_counter.use_count()} "
-            f"ptr={data_info} owner={repr(self._owner)}>"
+            f"ptr={data_info} owner={repr(self._owner)}>\n"
         )
 
 

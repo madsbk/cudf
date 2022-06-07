@@ -36,12 +36,12 @@ def manager(request):
 
 
 def test_spillable_buffer():
-    buf = Buffer(rmm.DeviceBuffer(size=10), sole_owner=True)
+    buf = Buffer(rmm.DeviceBuffer(size=10))
     assert buf.spillable
     buf.ptr  # Expose pointer
     assert buf.ptr_exposed
     assert not buf.spillable
-    buf = Buffer(rmm.DeviceBuffer(size=10), sole_owner=True)
+    buf = Buffer(rmm.DeviceBuffer(size=10))
     buf.__cuda_array_interface__  # Expose pointer
     assert buf.ptr_exposed
     assert not buf.spillable
@@ -73,12 +73,11 @@ def test_spillable_df_views():
     df_view = df.loc[1:]
     # TODO: support spillable views, for now we mark the view
     #       and its base as unspillable
-    assert not gen_df.is_spillable(df_view)
-    assert not gen_df.is_spillable(df)
+    assert gen_df.is_spillable(df)
 
 
 def test_spilling_buffer():
-    buf = Buffer(rmm.DeviceBuffer(size=10), sole_owner=True)
+    buf = Buffer(rmm.DeviceBuffer(size=10))
     buf.move_inplace(target="cpu")
     assert buf.is_spilled
     buf.ptr  # Expose pointer and trigger unspill
@@ -192,3 +191,8 @@ def test_spilling_df_views(manager):
     assert manager.spilled_and_unspilled() == (gen_df.buffer_size, 0)
     df_view.abs()
     assert manager.spilled_and_unspilled() == (0, gen_df.buffer_size)
+
+
+def test_unspill_view(manager):
+    df = gen_df()
+    df_view = df.loc[1:]
