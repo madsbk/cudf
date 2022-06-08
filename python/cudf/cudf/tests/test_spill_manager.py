@@ -10,6 +10,7 @@ import rmm
 
 import cudf
 from cudf.core.buffer import Buffer
+from cudf.testing._utils import assert_eq
 from cudf.core.spill_manager import SpillManager, global_manager
 
 
@@ -181,18 +182,23 @@ def test_lookup_address_range(manager: SpillManager):
     assert manager.lookup_address_range(buf.ptr - buf.size, buf.size) is None
 
 
-def test_spilling_df_views(manager):
+def test_spilling_with_views(manager):
     df = gen_df()
     df_view = df.loc[1:]
     buffers = manager.base_buffers()
-    (buf,) = buffers
     assert len(buffers) == 1
+    (buf,) = buffers
     buf.move_inplace(target="cpu")
     assert manager.spilled_and_unspilled() == (gen_df.buffer_size, 0)
     df_view.abs()
     assert manager.spilled_and_unspilled() == (0, gen_df.buffer_size)
 
 
-def test_unspill_view(manager):
+def test_spilling_views_remain_views(manager):
     df = gen_df()
-    df_view = df.loc[1:]
+    df_view_1 = df.iloc[1:]
+    df_view_2 = df.iloc[:-1]
+    (buf,) = buffers
+    buf.move_inplace(target="cpu")
+    buf.move_inplace(target="gpu")
+    

@@ -125,7 +125,10 @@ class Buffer(Serializable):
             if base_buffer is not None:
                 with base_buffer._lock:
                     assert not base_buffer.is_spilled
-                    base_buffer._ptr_exposed = True
+            elif not isinstance(self._owner, rmm.DeviceBuffer):
+                # the Buffer is constructed from externally owned memory,
+                # so it can never be spilled:
+                self._ptr_exposed = True
 
         self._spill_manager = None
         if global_manager.enabled:
