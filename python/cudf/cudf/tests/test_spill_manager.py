@@ -11,7 +11,7 @@ import rmm
 import cudf
 from cudf.core.buffer import Buffer
 from cudf.core.spill_manager import SpillManager, global_manager
-
+from cudf.testing._utils import assert_eq
 
 def gen_df() -> cudf.DataFrame:
     return cudf.DataFrame({"a": [1, 2, 3]})
@@ -182,13 +182,46 @@ def test_lookup_address_range(manager: SpillManager):
     assert manager.lookup_address_range(buf.ptr - buf.size, buf.size) is None
 
 
+def test_external_memory_never_spills(manager):
+    # test that external data, i.e., data not managed by RMM,
+    # is never spilled:
+    import cupy as cp
+    cp.cuda.set_allocator()  # uses default allocator
+
+    a = cp.asarray([1, 2, 3])
+    s = cudf.Series(a)
+    assert len(manager.base_buffers()) == 0
+    assert s._data[None].data.spillable == False
+
+
 def test_spilling_df_views(manager):
+    # test that views do not register with the spill manager
     df = gen_df()
     df_view = df.loc[1:]
     buffers = manager.base_buffers()
     (buf,) = buffers
     assert len(buffers) == 1
+
+    # test that operating on a view whose base buffer is spilled
+    # triggers unspilling of the base buffer
     buf.move_inplace(target="cpu")
     assert manager.spilled_and_unspilled() == (gen_df.buffer_size, 0)
     df_view.abs()
     assert manager.spilled_and_unspilled() == (0, gen_df.buffer_size)
+
+
+def test_modify_spilled_views(manager):
+    df = gen_df()
+    df_view = df.iloc[1:]
+    buf = gen_df.buffer(df)
+    buf.move_inplace(target="cpu")
+
+    # modify the spilled df and check that the changes are reflected
+    # in the view
+    df.iloc[1:] = 0
+    assert_eq(df_view, df.iloc[1:])
+
+    # now, modify the view and check that the changes are reflected in
+    # the df
+    df_view.iloc[:] = -1
+    assert_eq(df_view, df.iloc[1:])
