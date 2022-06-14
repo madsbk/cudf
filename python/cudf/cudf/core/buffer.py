@@ -139,10 +139,13 @@ class Buffer(Serializable):
                 )
                 if base:
                     with base._lock:
-                        base._viewers.add(self)
+                        if self is not base:
+                            base._viewers.add(self)
                         return
                 else:
-                    self._spill_manager.add(self)
+                    if isinstance(self._owner, rmm.DeviceBuffer):
+                        # TODO: find out why we even need this check
+                        self._spill_manager.add(self)
 
     @classmethod
     def from_buffer(cls, buffer: Buffer, size: int = None, offset: int = 0):
@@ -162,11 +165,13 @@ class Buffer(Serializable):
         ret = cls()
         with buffer._lock:
             buffer.move_inplace(target="gpu")
-        ret._ptr = buffer._ptr + offset
-        ret._size = buffer.size if size is None else size
-        ret._owner = get_base_buffer(buffer)
-        if ret._owner not in (None, ret):
-            ret._owner._viewers.add(ret)
+            ret._ptr = buffer._ptr + offset
+            ret._size = buffer.size if size is None else size
+            base = get_base_buffer(buffer)
+            if base:
+                with base._lock:
+                    base._viewers.add(ret)
+            ret._owner = base if base is not None else buffer
         return ret
 
     def __len__(self) -> int:
@@ -186,16 +191,23 @@ class Buffer(Serializable):
                     raise ValueError(
                         f"Cannot in-place move an unspillable buffer: {self}"
                     )
+                base_buf = get_base_buffer(self)
+                if base_buf not in (None, self):
+                    return base_buf.move_inplace(target=target)
                 host_mem = memoryview(bytearray(self.size))
                 ptr = self._ptr
                 rmm._lib.device_buffer.copy_ptr_to_host(self._ptr, host_mem)
                 self._ptr_desc["memoryview"] = host_mem
                 self._ptr = None
-                self._owner = None
                 for viewer in self._viewers:
                     viewer._ptr_desc["memoryview"] = host_mem
                     viewer._ptr_desc["offset"] = (viewer._ptr - ptr)
+                    viewer._ptr_desc["type"] =  "cpu"
+                    viewer._ptr = None
             elif (ptr_type, target) == ("cpu", "gpu"):
+                base_buf = get_base_buffer(self)
+                if base_buf not in (None, self):
+                    return base_buf.move_inplace(target=target)                
                 dev_mem = rmm.DeviceBuffer.to_device(
                     self._ptr_desc.pop("memoryview")
                 )
@@ -203,9 +215,10 @@ class Buffer(Serializable):
                 self._size = dev_mem.size
                 self._owner = dev_mem
                 for viewer in self._viewers:
-                    viewer._ptr_desc.pop("memoryview")
+                    viewer._ptr_desc.pop("memoryview", None)
                     offset = viewer._ptr_desc.pop("offset")
                     viewer._ptr = self._ptr + offset
+                    viewer._ptr_desc["type"] = "gpu"
             else:
                 # TODO: support moving to disk
                 raise ValueError(f"Unknown target: {target}")
@@ -261,6 +274,7 @@ class Buffer(Serializable):
 
     def to_host_array(self):
         data = np.empty((self.size,), "u1")
+        self.move_inplace(target="gpu")
         rmm._lib.device_buffer.copy_ptr_to_host(self._ptr, data)
         return data
 
