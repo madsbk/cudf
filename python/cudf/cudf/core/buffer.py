@@ -133,7 +133,7 @@ class Buffer(Serializable):
         self._spill_manager = None
         if global_manager.enabled:
             self._spill_manager = global_manager.get()
-            if self._ptr and self._size:
+            if self._ptr and self._size and not self._ptr_exposed:
                 base = self._spill_manager.lookup_address_range(
                     self._ptr, self._size
                 )

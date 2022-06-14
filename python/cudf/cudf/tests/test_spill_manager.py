@@ -189,6 +189,7 @@ def test_external_memory_never_spills(manager):
     cp.cuda.set_allocator()  # uses default allocator
 
     a = cp.asarray([1, 2, 3])
+    assert len(manager.base_buffers()) == 0
     s = cudf.Series(a)
     assert len(manager.base_buffers()) == 0
     assert s._data[None].data.spillable == False
@@ -203,6 +204,7 @@ def test_spilling_df_views(manager):
 
     # test that operating on a view whose base buffer is spilled
     # triggers unspilling of the base buffer
+    buf = buffers[0]
     buf.move_inplace(target="cpu")
     assert manager.spilled_and_unspilled() == (gen_df.buffer_size, 0)
     df_view.abs()

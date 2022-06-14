@@ -271,11 +271,13 @@ cdef class Column:
         if value is None:
             mask = None
         elif hasattr(value, "__cuda_array_interface__"):
+            if isinstance(value, Buffer):
+                mask = Buffer.from_buffer(value)
             if value.__cuda_array_interface__["typestr"] not in ("|i1", "|u1"):
                 if isinstance(value, Column):
                     value = value.data_array_view
                 value = cp.asarray(value).view('|u1')
-            mask = Buffer(value)
+                mask = Buffer(value)
             if mask.size < required_num_bytes:
                 raise ValueError(error_msg.format(str(value.size)))
             if mask.size < mask_size:
