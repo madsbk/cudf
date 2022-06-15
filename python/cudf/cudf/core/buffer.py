@@ -340,7 +340,7 @@ class Buffer(Serializable):
         from rmm._lib.device_buffer import copy_device_to_ptr
 
         out = Buffer.empty(size=self.size)
-        copy_device_to_ptr(self.ptr, out.ptr, self.size)
+        copy_device_to_ptr(self._ptr, out.ptr, self.size)
         return out
 
     def __repr__(self) -> str:
