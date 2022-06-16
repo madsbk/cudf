@@ -318,7 +318,8 @@ class Buffer(Serializable):
         assert (
             header["frame_count"] == 1
         ), "Only expecting to deserialize Buffer with a single frame."
-        buf = Buffer.from_buffer(frames[0], **header["constructor-kwargs"])
+        func = Buffer.from_buffer if isinstance(frames[0], cls) else cls
+        buf = func(frames[0], **header["constructor-kwargs"])
         ptr_exposed = buf._ptr_exposed
         if header["desc"]["shape"] != buf.__cuda_array_interface__["shape"]:
             raise ValueError(
