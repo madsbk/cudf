@@ -131,7 +131,7 @@ class NumericalColumn(NumericalBaseColumn):
             "shape": (len(self),),
             "strides": (self.dtype.itemsize,),
             "typestr": self.dtype.str,
-            "data": (self.data_ptr, False),
+            "data": (self.data.__cuda_array_interface__["data"], False),
             "version": 1,
         }
 
@@ -144,7 +144,7 @@ class NumericalColumn(NumericalBaseColumn):
                 __cuda_array_interface__={
                     "shape": (len(self),),
                     "typestr": "<t1",
-                    "data": (self.mask_ptr, True),
+                    "data": (self.mask.__cuda_array_interface__["data"], True),
                     "version": 1,
                 }
             )

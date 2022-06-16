@@ -199,6 +199,7 @@ class Buffer(Serializable):
                 rmm._lib.device_buffer.copy_ptr_to_host(self._ptr, host_mem)
                 self._ptr_desc["memoryview"] = host_mem
                 self._ptr = None
+                self._owner = rmm.DeviceBuffer()
                 for viewer in self._viewers:
                     viewer._ptr_desc["memoryview"] = host_mem
                     viewer._ptr_desc["offset"] = (viewer._ptr - ptr)
