@@ -230,7 +230,7 @@ class Buffer(Serializable):
             process = psutil.Process(os.getpid())
 
             if (ptr_type, target) == ("gpu", "cpu"):
-                host_mem = memoryview(bytearray(self.size))
+                host_mem = memoryview(np.ones(self.size, dtype="u1"))
                 rmm._lib.device_buffer.copy_ptr_to_host(self._ptr, host_mem)
                 self._ptr_desc["memoryview"] = host_mem
                 self._ptr = None
