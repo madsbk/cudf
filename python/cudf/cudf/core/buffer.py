@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import functools
+import gc
 import operator
+import os
 import pickle
 import time
 from threading import RLock
 from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
+import psutil
 
 import rmm
 
@@ -224,6 +227,8 @@ class Buffer(Serializable):
                     f"Cannot in-place move an unspillable buffer: {self}"
                 )
 
+            process = psutil.Process(os.getpid())
+
             if (ptr_type, target) == ("gpu", "cpu"):
                 host_mem = memoryview(bytearray(self.size))
                 rmm._lib.device_buffer.copy_ptr_to_host(self._ptr, host_mem)
@@ -231,12 +236,22 @@ class Buffer(Serializable):
                 self._ptr = None
                 self._owner = None
             elif (ptr_type, target) == ("cpu", "gpu"):
+                gc.collect()
+                m1 = process.memory_info().rss
+
                 dev_mem = rmm.DeviceBuffer.to_device(
-                    self._ptr_desc.pop("memoryview")
+                    self._ptr_desc["memoryview"]
                 )
+                gc.collect()
+                m2 = process.memory_info().rss
+                time.sleep(1)
+                if abs(m2 - m1) > 2**20:
+                    print(f"rmm.DeviceBuffer.to_device() - host memory usage: {format_bytes(m2 - m1)}")
+
                 self._ptr = dev_mem.ptr
                 self._size = dev_mem.size
                 self._owner = dev_mem
+                del self._ptr_desc["memoryview"]
             else:
                 # TODO: support moving to disk
                 raise ValueError(f"Unknown target: {target}")

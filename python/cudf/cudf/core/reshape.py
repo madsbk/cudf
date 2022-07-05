@@ -238,8 +238,9 @@ def concat(objs, axis=0, join="outer", ignore_index=False, sort=None):
     if not objs:
         raise ValueError("All objects passed were None")
 
-    if global_manager.enabled:
-        mark_columns_as_read_only_inplace(objs)
+    # Disable for debugging memory issue
+    # if global_manager.enabled:
+    #     mark_columns_as_read_only_inplace(objs)
 
     # Return for single object
     if len(objs) == 1:
