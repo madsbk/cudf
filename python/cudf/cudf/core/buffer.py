@@ -236,22 +236,30 @@ class Buffer(Serializable):
                 self._ptr = None
                 self._owner = None
             elif (ptr_type, target) == ("cpu", "gpu"):
+                # Make sure the memoryview hasn't been swapped to disk
+                a = self._ptr_desc["memoryview"].obj.copy()
                 gc.collect()
+                time.sleep(1)
                 m1 = process.memory_info().rss
 
+                # We do not expect this to use HOST memory!
                 dev_mem = rmm.DeviceBuffer.to_device(
                     self._ptr_desc["memoryview"]
                 )
+
                 gc.collect()
-                m2 = process.memory_info().rss
                 time.sleep(1)
+                m2 = process.memory_info().rss
                 if abs(m2 - m1) > 2**20:
-                    print(f"rmm.DeviceBuffer.to_device() - host memory usage: {format_bytes(m2 - m1)}")
+                    print(
+                        f"rmm.DeviceBuffer.to_device() - *host* memory usage: {format_bytes(m2 - m1)}"
+                    )
 
                 self._ptr = dev_mem.ptr
                 self._size = dev_mem.size
                 self._owner = dev_mem
                 del self._ptr_desc["memoryview"]
+                del a
             else:
                 # TODO: support moving to disk
                 raise ValueError(f"Unknown target: {target}")
