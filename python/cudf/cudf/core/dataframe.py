@@ -11,12 +11,14 @@ import re
 import sys
 import textwrap
 import warnings
+import weakref
 from collections import abc, defaultdict
 from typing import (
     Any,
     Callable,
     Dict,
     List,
+    Mapping,
     MutableMapping,
     Optional,
     Set,
@@ -56,6 +58,12 @@ from cudf.api.types import (
 )
 from cudf.core import column, df_protocol, reshape
 from cudf.core.abc import Serializable
+from cudf.core.buffer.spill_manager import get_global_manager
+from cudf.core.buffer.spillable_buffer import (
+    SpillableBuffer,
+    SpillableBufferSlice,
+)
+from cudf.core.buffer.utils import get_columns, zeroing_column_offset_inplace
 from cudf.core.column import (
     CategoricalColumn,
     ColumnBase,
@@ -2315,6 +2323,33 @@ class DataFrame(IndexedFrame, Serializable, GetAttrGetItemMixin):
                 self._empty_like(keep_index)
                 for _ in range(map_size - len(result))
             ]
+
+        manager = get_global_manager()
+        if manager is None:
+            return result
+
+        buffers: Mapping[
+            SpillableBuffer, weakref.WeakSet[ColumnBase]
+        ] = defaultdict(weakref.WeakSet)
+        for col in get_columns(result):
+            buffers[col.base_data].add(col)
+
+            # Reset the column offset to zero and use a SpillableBufferSlice
+            # as the base data.
+            zeroing_column_offset_inplace(col)
+
+        for buf, columns in buffers.items():
+
+            def f(cols):
+                nbytes = 0
+                for col in cols:
+                    nbytes += col.memory_usage
+                    assert col._offset == 0
+                    assert isinstance(col.base_data, SpillableBufferSlice)
+                    col.set_base_data(col.base_data.spill_and_promote())
+                return nbytes
+
+            manager.register_spill_handler(buf, f, columns)
 
         return result
 

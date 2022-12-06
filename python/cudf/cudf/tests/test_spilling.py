@@ -179,7 +179,7 @@ def test_creations(manager: SpillManager):
 def test_spillable_df_groupby(manager: SpillManager):
     df = cudf.DataFrame({"a": [1, 1, 1]})
     gb = df.groupby("a")
-    assert len(single_column_df_base_data(df)._spill_locks) == 0
+    assert len(single_column_df_base_data(df)._base._spill_locks) == 0
     gb._groupby
     # `gb._groupby`, which is cached on `gb`, holds a spill lock
     assert len(single_column_df_base_data(df)._spill_locks) == 1

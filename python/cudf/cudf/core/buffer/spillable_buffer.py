@@ -465,7 +465,22 @@ class SpillableBufferSlice(SpillableBuffer):
             f"offset={format_bytes(self._offset)} of {self._base} "
         )
 
-    # The rest of the methods delegate to the base buffer.
+    def spill_and_promote(self) -> SpillableBuffer:
+        with self.lock:
+            if self.is_spilled:
+                return SpillableBuffer._from_host_memory(self.memoryview())
+            else:
+                assert self._base._ptr_desc["type"] == "gpu"
+                mem = memoryview(bytearray(self.size))
+                rmm._lib.device_buffer.copy_ptr_to_host(
+                    self._base.ptr + self._offset, mem
+                )
+                return SpillableBuffer._from_host_memory(mem)
+
+    #
+    # The rest of the methods delegate to the base buffer as-is.
+    #
+
     def spill(self, target: str = "cpu") -> None:
         return self._base.spill(target=target)
 

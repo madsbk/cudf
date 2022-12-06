@@ -6,7 +6,16 @@ import threading
 import weakref
 from contextlib import ContextDecorator
 from functools import cached_property
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Mapping,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+)
 
 from cudf.core.buffer.buffer import Buffer, cuda_array_interface_wrapper
 from cudf.core.buffer.spill_manager import get_global_manager
@@ -168,3 +177,53 @@ class cached_property_delete_column_when_spilled(cached_property):
 
         manager.register_spill_handler(ret.base_data, f, weakref.ref(instance))
         return ret
+
+
+if TYPE_CHECKING:
+    from cudf._lib.column import Column
+
+
+def get_columns(obj: Any) -> Set[Column]:
+    """Return all columns in `obj` (no duplicates)"""
+
+    from cudf._lib.column import Column
+    from cudf.core.column_accessor import ColumnAccessor
+    from cudf.core.frame import Frame
+    from cudf.core.index import BaseIndex, RangeIndex
+    from cudf.core.indexed_frame import IndexedFrame
+
+    def _get_columns(obj: object, found: Set[Column]) -> None:
+        if isinstance(obj, RangeIndex):
+            return
+        elif isinstance(obj, Column):
+            found.add(obj)
+        elif isinstance(obj, IndexedFrame):
+            _get_columns(obj._data, found)
+            _get_columns(obj._index, found)
+        elif isinstance(obj, (Frame, BaseIndex)):
+            _get_columns(obj._data, found)
+        elif isinstance(obj, ColumnAccessor):
+            for o in obj.columns:
+                _get_columns(o, found)
+        elif isinstance(obj, (list, tuple)):
+            for o in obj:
+                _get_columns(o, found)
+        elif isinstance(obj, Mapping):
+            for o in obj.values():
+                _get_columns(o, found)
+
+    ret: Set[Column] = set()
+    _get_columns(obj, found=ret)
+    return ret
+
+
+def zeroing_column_offset_inplace(col: Column) -> None:
+    mask = None if col.base_mask is None else col.mask
+    children = None if col.base_children is None else col.children
+    if col.data is not None:
+        col.set_base_data(col.data)
+    col._offset = 0
+    if col.base_mask is not None:
+        col.set_base_mask(mask)
+    if col.base_children is not None:
+        col.set_base_children(tuple(children))

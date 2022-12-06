@@ -16,6 +16,7 @@ from cudf.core.buffer import (
     as_buffer,
     get_spill_lock,
 )
+from cudf.core.buffer.utils import zeroing_column_offset_inplace
 
 from cpython.buffer cimport PyObject_CheckBuffer
 from libc.stdint cimport uintptr_t
@@ -71,6 +72,8 @@ cdef class Column:
         self.set_base_children(children)
         self.set_base_data(data)
         self.set_base_mask(mask)
+
+        zeroing_column_offset_inplace(self)  # TODO: remove, only for testing
 
     @property
     def base_size(self):
