@@ -231,7 +231,7 @@ def main(
 ):
     mr, spill = allocation_strategy(base_memory_resource, use_spilling, use_pool)
     cudf.set_option("spill", spill)
-    cudf.set_option("spill_on_demand", True)
+    # cudf.set_option("spill_on_demand", True)
     rmm.mr.set_current_device_resource(mr)
     print("Running experiment")
     print("------------------")
@@ -245,7 +245,7 @@ def main(
         )
     except Exception as e:
         print(f"Failed generating tables: {e}")
-        return
+        raise
 
     nbytes_left = left.memory_usage().sum() / 1024 ** 3
     nbytes_right = right.memory_usage().sum() / 1024 ** 3
