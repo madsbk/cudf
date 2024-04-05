@@ -333,16 +333,17 @@ class SpillManager:
             Number of actually bytes spilled.
         """
         spilled = 0
-        for buf in self.buffers(order_by_access_time=True):
-            if buf.lock.acquire(blocking=False):
-                try:
-                    if not buf.is_spilled and buf.spillable:
-                        buf.spill(target="cpu")
-                        spilled += buf.size
-                        if spilled >= nbytes:
-                            break
-                finally:
-                    buf.lock.release()
+        if nbytes > 0:
+            for buf in self.buffers(order_by_access_time=True):
+                if buf.lock.acquire(blocking=False):
+                    try:
+                        if not buf.is_spilled and buf.spillable:
+                            buf.spill(target="cpu")
+                            spilled += buf.size
+                            if spilled >= nbytes:
+                                break
+                    finally:
+                        buf.lock.release()
         return spilled
 
     def spill_to_device_limit(self, device_limit: Optional[int] = None) -> int:
@@ -369,6 +370,9 @@ class SpillManager:
             return 0
         unspilled = sum(
             buf.size for buf in self.buffers() if not buf.is_spilled
+        )
+        print(
+            f"spill_to_device_limit() - limit: {limit}, unspilled: {unspilled}"
         )
         return self.spill_device_memory(nbytes=unspilled - limit)
 
