@@ -66,11 +66,39 @@ def allocation_strategy(
             mr = PoolMemoryResource(mr(), initial_pool_size=30*(2**30), maximum_pool_size=None)
             # if base == Base.MANAGED and spill:
             #     mr.set_expand_callback(expand_callback)
-            return mr, spill
         else:
-            return mr(), spill
+            mr = mr()
     except KeyError:
         raise RuntimeError(f"Allocation strategy {base}-{spill=}-{pool=} is not valid")
+
+    cur_alloc = [0]
+    manager = get_global_manager()
+
+    def allocate_func(size, stream):
+        cur_alloc[0] += size
+
+
+        spilled = sum(
+            buf.size for buf in manager.buffers() if buf.is_spilled
+        )
+        unspilled = cur_alloc[0] - spilled
+        limit = 30*(2**30)
+
+        print(f"Allocating {size} bytes, cur_alloc: {cur_alloc[0]}, spilled: {spilled}, unspilled: {unspilled}, limit: {limit}")
+        manager.spill_device_memory(nbytes=unspilled - limit)
+
+        return mr.allocate(size, stream)
+
+    def deallocate_func(ptr, size, stream):
+        cur_alloc[0] -= size
+        print(f"Deallocating {size} bytes, cur_alloc: {cur_alloc[0]}")
+        return mr.deallocate(ptr, size, stream)
+
+    if manager is None:
+        manager = mr
+    else:
+        resource = rmm.mr.CallbackMemoryResource(allocate_func, deallocate_func)
+    return resource, spill
 
 
 # Set to false if random number generation blows through memory limit
