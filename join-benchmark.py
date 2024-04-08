@@ -257,9 +257,10 @@ def main(
         bool, typer.Option(help="Should categories use string names?")
     ] = False,
 ):
+    cudf.set_option("spill", use_spilling)
+    cudf.set_option("spill_on_demand", False)
+
     mr, spill = allocation_strategy(base_memory_resource, use_spilling, use_pool)
-    cudf.set_option("spill", spill)
-    cudf.set_option("spill_on_demand", True)
     rmm.mr.set_current_device_resource(mr)
     print("Running experiment")
     print("------------------")
