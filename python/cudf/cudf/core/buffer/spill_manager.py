@@ -531,7 +531,8 @@ def set_device_limit_globally(limit: int) -> None:
         print(
             f"Allocating {size} bytes, cur_alloc: {cur_alloc[0]}, unspilled: {unspilled}, limit: {limit}"
         )
-        manager.spill_device_memory(nbytes=unspilled - limit)
+        if cur_alloc[0] > limit:
+            manager.spill_device_memory(nbytes=cur_alloc[0] - limit)
         return mr_base.allocate(size, stream)
 
     def deallocate_func(ptr, size, stream):
