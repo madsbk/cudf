@@ -40,6 +40,8 @@ VALID_STRATEGIES: dict[tuple[Base, bool, bool], tuple[MemoryResource, bool, bool
     (Base.MANAGED, False, True): (ManagedMemoryResource, False, True),
     (Base.MANAGED, False, False): (ManagedMemoryResource, False, False),
     (Base.MANAGED, True, True): (ManagedMemoryResource, True, True),
+    (Base.MANAGED, False, True): (ManagedMemoryResource, False, True),
+    (Base.MANAGED, True, False): (ManagedMemoryResource, True, False),
 }
 
 def expand_callback(size: int) -> bool:
