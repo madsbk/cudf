@@ -180,7 +180,7 @@ def create_tables(P: int, N: int, *, string_categoricals: bool):
 import traceback
 def with_timing(fn, *, query) -> int:
     total = 0
-    for i in range(3):
+    for i in range(5):
         gc.collect()
         try:
             start = timeit.default_timer()

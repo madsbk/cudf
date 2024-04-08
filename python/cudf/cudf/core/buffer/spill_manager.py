@@ -258,6 +258,7 @@ class SpillManager:
         already locked buffers.
         """
         # Let's try to spill device memory
+        print("_out_of_memory_handle()")
 
         spilled = self.spill_device_memory(nbytes=nbytes)
 
@@ -525,13 +526,13 @@ def set_device_limit_globally(limit: int) -> None:
 
     def allocate_func(size, stream):
         cur_alloc[0] += size
-        unspilled = sum(
-            buf.size for buf in manager.buffers() if not buf.is_spilled
-        )
-        print(
-            f"Allocating {size} bytes, cur_alloc: {cur_alloc[0]}, unspilled: {unspilled}, limit: {limit}"
-        )
+        # unspilled = sum(
+        #     buf.size for buf in manager.buffers() if not buf.is_spilled
+        # )
         if cur_alloc[0] > limit:
+            print(
+                f"Allocating {size} bytes, cur_alloc: {cur_alloc[0]}, limit: {limit}"
+            )
             manager.spill_device_memory(nbytes=cur_alloc[0] - limit)
         return mr_base.allocate(size, stream)
 
