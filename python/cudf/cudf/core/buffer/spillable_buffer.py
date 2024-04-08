@@ -212,8 +212,12 @@ class SpillableBufferOwner(BufferOwner):
                     #     self._ptr, host_mem
                     # )
                     host_mem = (self._ptr, self._owner)
-                    err, = cuda.cudart.cudaMemPrefetchAsync(self._ptr, self._size, cuda.cudart.cudaCpuDeviceId, 0)
-                    assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemPrefetchAsync fail: {err}"
+                    (err,) = cuda.cudart.cudaMemPrefetchAsync(
+                        self._ptr, self._size, cuda.cudart.cudaCpuDeviceId, 0
+                    )
+                    assert (
+                        err == cuda.cudart.cudaError_t.cudaSuccess
+                    ), f"cudaMemPrefetchAsync fail: {err}"
                 self._ptr_desc["memoryview"] = host_mem
                 self._ptr = 0
                 self._owner = None

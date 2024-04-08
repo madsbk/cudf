@@ -66,9 +66,10 @@ def allocation_strategy(
             mr = PoolMemoryResource(mr(), initial_pool_size=30*(2**30), maximum_pool_size=None)
             # if base == Base.MANAGED and spill:
             #     mr.set_expand_callback(expand_callback)
-            return mr, spill
         else:
-            return mr(), spill
+            mr = mr()
+        return mr, spill
+
     except KeyError:
         raise RuntimeError(f"Allocation strategy {base}-{spill=}-{pool=} is not valid")
 
