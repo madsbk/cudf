@@ -199,42 +199,56 @@ class SpillableBufferOwner(BufferOwner):
                 raise ValueError(
                     f"Cannot in-place move an unspillable buffer: {self}"
                 )
-
-            print("spill ", (ptr_type, target))
+            import os
+            USE_HOST_SPILLING = eval(os.environ['USE_HOST_SPILLING'])
+            print("spill ", (ptr_type, target), ", USE_HOST_SPILLING: ", USE_HOST_SPILLING)
             if (ptr_type, target) == ("gpu", "cpu"):
                 with annotate(
                     message="SpillDtoH",
                     color=_get_color_for_nvtx("SpillDtoH"),
                     domain="cudf_python-spill",
                 ):
-                    # host_mem = host_memory_allocation(self.size)
-                    # rmm._lib.device_buffer.copy_ptr_to_host(
-                    #     self._ptr, host_mem
-                    # )
-                    host_mem = (self._ptr, self._owner)
-                    err, = cuda.cudart.cudaMemPrefetchAsync(self._ptr, self._size, cuda.cudart.cudaCpuDeviceId, 0)
-                    assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemPrefetchAsync fail: {err}"
-                self._ptr_desc["memoryview"] = host_mem
-                self._ptr = 0
-                self._owner = None
+                    if USE_HOST_SPILLING:
+                        host_mem = host_memory_allocation(self.size)
+                        rmm._lib.device_buffer.copy_ptr_to_host(
+                            self._ptr, host_mem
+                        )
+                    else:
+                        host_mem = (self._ptr, self._owner)
+
+                        err, = cuda.cudart.cudaMemAdvise(self._ptr, self._size, cuda.cudart.cudaMemoryAdvise.cudaMemAdviseUnsetReadMostly, 0)
+                        assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemAdvise fail: {err}"
+                        err, = cuda.cudart.cudaMemAdvise(self._ptr, self._size, cuda.cudart.cudaMemoryAdvise.cudaMemAdviseUnsetPreferredLocation, 0)
+                        assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemAdviseUnsetPreferredLocation fail: {err}"
+
+                        err, = cuda.cudart.cudaMemPrefetchAsync(self._ptr, self._size, cuda.cudart.cudaCpuDeviceId, 0)
+                        assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemPrefetchAsync fail: {err}"
+
+                    self._ptr_desc["memoryview"] = host_mem
+                    self._ptr = 0
+                    self._owner = None
             elif (ptr_type, target) == ("cpu", "gpu"):
-                # Notice, this operation is prone to deadlock because the RMM
-                # allocation might trigger spilling-on-demand which in turn
-                # trigger a new call to this buffer's `spill()`.
-                # Therefore, it is important that spilling-on-demand doesn't
-                # try to unspill an already locked buffer!
-                # with annotate(
-                #     message="SpillHtoD",
-                #     color=_get_color_for_nvtx("SpillHtoD"),
-                #     domain="cudf_python-spill",
-                # ):
-                #     dev_mem = rmm.DeviceBuffer.to_device(
-                #         self._ptr_desc.pop("memoryview")
-                #     )
-                self._ptr, self._owner = self._ptr_desc.pop("memoryview")
-                # self._ptr = dev_mem.ptr
-                # self._owner = dev_mem
-                # assert self._size == dev_mem.size
+                with annotate(
+                    message="SpillHtoD",
+                    color=_get_color_for_nvtx("SpillHtoD"),
+                    domain="cudf_python-spill",
+                ):
+                    if USE_HOST_SPILLING:
+                        dev_mem = rmm.DeviceBuffer.to_device(
+                            self._ptr_desc.pop("memoryview")
+                        )
+                        self._ptr = dev_mem.ptr
+                        self._owner = dev_mem
+                        assert self._size == dev_mem.size
+                    else:
+                        self._ptr, self._owner = self._ptr_desc.pop("memoryview")
+
+                        err, = cuda.cudart.cudaMemAdvise(self._ptr, self._size, cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation, 0)
+                        assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemAdviseSetPreferredLocation fail: {err}"
+
+                        err, = cuda.cudart.cudaMemPrefetchAsync(self._ptr, self._size, 0, 0)
+                        assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemPrefetchAsync fail: {err}"
+
             else:
                 # TODO: support moving to disk
                 raise ValueError(f"Unknown target: {target}")
