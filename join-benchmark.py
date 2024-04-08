@@ -95,7 +95,7 @@ def allocation_strategy(
         return mr.deallocate(ptr, size, stream)
 
     if manager is None:
-        manager = mr
+        resource = mr
     else:
         resource = rmm.mr.CallbackMemoryResource(allocate_func, deallocate_func)
     return resource, spill
