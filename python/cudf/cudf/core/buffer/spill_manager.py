@@ -429,6 +429,9 @@ def get_global_manager() -> Optional[SpillManager]:
             set_global_manager(manager)
             if get_option("spill_on_demand"):
                 set_spill_on_demand_globally()
+            limit = get_option("tight_device_limit")
+            if limit:
+                set_device_limit_globally(limit=limit)
         else:
             set_global_manager(None)
     return _global_manager
@@ -500,3 +503,42 @@ def spill_on_demand_globally():
                 "RMM memory source stack was changed while in the context"
             )
         rmm.mr.set_current_device_resource(mr_stack[1])
+
+
+def set_device_limit_globally(limit: int) -> None:
+    manager = get_global_manager()
+    if manager is None:
+        raise ValueError(
+            "Cannot set global device limit with no global spill manager"
+        )
+    mr_base = rmm.mr.get_current_device_resource()
+    if any(
+        isinstance(m, rmm.mr.CallbackMemoryResource)
+        for m in get_rmm_memory_resource_stack(mr_base)
+    ):
+        raise ValueError(
+            "Global device limit (or another callback memory resource) "
+            "is already registered"
+        )
+
+    cur_alloc = [0]
+
+    def allocate_func(size, stream):
+        cur_alloc[0] += size
+        unspilled = sum(
+            buf.size for buf in manager.buffers() if not buf.is_spilled
+        )
+        print(
+            f"Allocating {size} bytes, cur_alloc: {cur_alloc[0]}, unspilled: {unspilled}, limit: {limit}"
+        )
+        manager.spill_device_memory(nbytes=unspilled - limit)
+        return mr_base.allocate(size, stream)
+
+    def deallocate_func(ptr, size, stream):
+        cur_alloc[0] -= size
+        # print(f"Deallocating {size} bytes, cur_alloc: {cur_alloc[0]}")
+        return mr_base.deallocate(ptr, size, stream)
+
+    rmm.mr.set_current_device_resource(
+        rmm.mr.CallbackMemoryResource(allocate_func, deallocate_func)
+    )

@@ -276,6 +276,20 @@ _register_option(
 )
 
 _register_option(
+    "tight_device_limit",
+    _env_get_int("CUDF_TIGHT_DEVICE_LIMIT", None),
+    textwrap.dedent(
+        """
+        Enforce a device memory limit in bytes.
+        This has no effect if spilling is disabled, see the "spill" option.
+        \tValid values are any positive integer or None (disabled).
+        \tDefault is None.
+        """
+    ),
+    _integer_and_none_validator,
+)
+
+_register_option(
     "spill_stats",
     _env_get_int("CUDF_SPILL_STATS", 0),
     textwrap.dedent(
