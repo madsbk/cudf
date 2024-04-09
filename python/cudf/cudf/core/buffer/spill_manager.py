@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import io
+import os
 import textwrap
 import threading
 import traceback
@@ -524,16 +525,23 @@ def set_device_limit_globally(limit: int) -> None:
 
     cur_alloc = [0]
 
+    USE_UVM_SPILLING = eval(os.environ['USE_UVM_SPILLING'])
+
     def allocate_func(size, stream):
         cur_alloc[0] += size
-        # unspilled = sum(
-        #     buf.size for buf in manager.buffers() if not buf.is_spilled
-        # )
-        if cur_alloc[0] > limit:
+        spilled = sum(
+            buf.size for buf in manager.buffers() if buf.is_spilled
+        )
+        if USE_UVM_SPILLING:
+            unspilled = cur_alloc[0] - spilled
+        else:
+            unspilled = cur_alloc[0]
+
+        if unspilled > limit:
             print(
-                f"Allocating {size} bytes, cur_alloc: {cur_alloc[0]}, limit: {limit}"
+                f"Allocating {size} bytes, unspilled: {unspilled}, limit: {limit}"
             )
-            manager.spill_device_memory(nbytes=cur_alloc[0] - limit)
+            manager.spill_device_memory(nbytes=unspilled - limit)
         return mr_base.allocate(size, stream)
 
     def deallocate_func(ptr, size, stream):
