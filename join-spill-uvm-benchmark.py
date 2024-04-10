@@ -177,7 +177,9 @@ def create_tables(P: int, N: int, *, string_categoricals: bool):
     #         rename=True,
     #         ordered=False,
     #     )
-    return left, right
+
+    # Deep copy the dataframes to avoid any hanging arrays
+    return left.copy(deep=True), right.copy(deep=True)
 
 import traceback
 def with_timing(fn, *, query) -> int:
