@@ -203,7 +203,7 @@ class SpillableBufferOwner(BufferOwner):
                 )
 
             USE_UVM_SPILLING = eval(os.environ['USE_UVM_SPILLING'])
-            # print("spill ", (ptr_type, target), ", USE_UVM_SPILLING: ", USE_UVM_SPILLING)
+            #print("spill ", (ptr_type, target), f", size: {self._size}, owner.nbytes: {self._owner.nbytes}, owner.nbytes: {self._owner}")
 
             if (ptr_type, target) == ("gpu", "cpu"):
                 with annotate(

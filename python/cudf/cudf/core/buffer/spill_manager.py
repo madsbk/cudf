@@ -527,8 +527,7 @@ def set_device_limit_globally(limit: int) -> None:
 
     USE_UVM_SPILLING = eval(os.environ['USE_UVM_SPILLING'])
 
-    def allocate_func(size, stream):
-        cur_alloc[0] += size
+    def get_unspilled():
         spilled = sum(
             buf.size for buf in manager.buffers() if buf.is_spilled
         )
@@ -536,12 +535,20 @@ def set_device_limit_globally(limit: int) -> None:
             unspilled = cur_alloc[0] - spilled
         else:
             unspilled = cur_alloc[0]
+        return unspilled
 
-        if unspilled > limit:
-            print(
-                f"Allocating {size} bytes, unspilled: {unspilled}, limit: {limit}"
-            )
+    def allocate_func(size, stream):
+        # print(f"allocate_func({size}) - unspilled: {get_unspilled()}")
+        before = cur_alloc[0]
+        cur_alloc[0] += size
+        unspilled = get_unspilled()
+        while unspilled > limit:
+            # print(
+            #     f"SPILL {size} bytes, unspilled: {unspilled}, limit: {limit}"
+            # )
             manager.spill_device_memory(nbytes=unspilled - limit)
+            unspilled = get_unspilled()
+        # print(f"cur_alloc: {before} => {cur_alloc[0]}, unspilled: {unspilled}")
         return mr_base.allocate(size, stream)
 
     def deallocate_func(ptr, size, stream):
