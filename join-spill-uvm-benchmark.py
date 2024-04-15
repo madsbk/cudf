@@ -1,6 +1,7 @@
 # Extended version of <https://github.com/rapidsai/db-benchmark/issues/9>
 
 import gc
+import os
 import timeit
 from dataclasses import dataclass
 from enum import Enum
@@ -46,11 +47,10 @@ VALID_STRATEGIES: dict[tuple[Base, bool, bool], tuple[MemoryResource, bool, bool
 
 def expand_callback(size: int) -> bool:
     manager = get_global_manager()
-    # print("expand_callback() - manager: ", manager)
     if manager is None:
         return False
     ret = manager.spill_device_memory(nbytes=size)
-    # print(f"expand_callback() - size {size}, cudf spilled: {ret}")
+    print(f"expand_callback() - size {size}, cudf spilled: {ret}")
     return ret
 
 
@@ -61,7 +61,9 @@ def allocation_strategy(
     try:
         mr, spill, pool = VALID_STRATEGIES[(base, spill, pool)]
         if pool:
-            mr = PoolMemoryResource(mr(), initial_pool_size=30*(2**30), maximum_pool_size=None)
+            INIT_POOL_SIZE = eval(os.environ['INIT_POOL_SIZE'])
+            print(f"INIT_POOL_SIZE: {INIT_POOL_SIZE}")
+            mr = PoolMemoryResource(mr(), initial_pool_size=INIT_POOL_SIZE, maximum_pool_size=None)
             if base == Base.MANAGED and spill and hasattr(mr, "set_expand_callback"):
                 mr.set_expand_callback(expand_callback)
             return mr, spill
@@ -196,6 +198,7 @@ def with_timing(fn, *, query) -> int:
             print(f"{query} repeat={i+1}: {end - start:.2f}s")
         except Exception as e:
             print(f"Query {query} failed: \n{traceback.format_exc()}")
+            raise
         finally:
             gc.collect()
     return total
@@ -245,6 +248,7 @@ def main(
         )
     except Exception as e:
         print(f"Failed generating tables: {e}")
+        raise
         return
 
     nbytes_left = left.memory_usage().sum() / 1024 ** 3

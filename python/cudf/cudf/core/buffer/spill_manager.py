@@ -525,13 +525,13 @@ def set_device_limit_globally(limit: int) -> None:
 
     cur_alloc = [0]
 
-    USE_UVM_SPILLING = eval(os.environ['USE_UVM_SPILLING'])
+    SPILL_BY_PREFETCH = eval(os.environ['SPILL_BY_PREFETCH'])
 
     def get_unspilled():
         spilled = sum(
             buf.size for buf in manager.buffers() if buf.is_spilled
         )
-        if USE_UVM_SPILLING:
+        if SPILL_BY_PREFETCH:
             unspilled = cur_alloc[0] - spilled
         else:
             unspilled = cur_alloc[0]

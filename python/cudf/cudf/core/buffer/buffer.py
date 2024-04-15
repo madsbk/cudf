@@ -268,6 +268,9 @@ class BufferOwner(Serializable):
         SpillableBuffer.get_ptr
         ExposureTrackedBuffer.get_ptr
         """
+        # import cuda.cudart
+        # err, = cuda.cudart.cudaMemPrefetchAsync(self._ptr, self._size, 0, 0)
+        # assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemPrefetchAsync fail: {err}"
         return self._ptr
 
     def memoryview(

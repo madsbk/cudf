@@ -190,11 +190,18 @@ class SpillableBufferOwner(BufferOwner):
         target : str
             The target of the spilling.
         """
-
         time_start = time.perf_counter()
         with self.lock:
             ptr_type = self._ptr_desc["type"]
             if ptr_type == target:
+                if (ptr_type, target) == ("gpu", "gpu"):
+
+                    # err, = cuda.cudart.cudaMemAdvise(self._ptr, self._size, cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation, 0)
+                    # assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemAdviseSetPreferredLocation fail: {err}"
+                    print(f"cudaMemPrefetchAsync: {self._size}")
+                    err, = cuda.cudart.cudaMemPrefetchAsync(self._ptr, self._size, 0, 0)
+                    assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemPrefetchAsync fail: {err}"
+                    pass
                 return
 
             if not self.spillable:
@@ -202,22 +209,21 @@ class SpillableBufferOwner(BufferOwner):
                     f"Cannot in-place move an unspillable buffer: {self}"
                 )
 
-            USE_UVM_SPILLING = eval(os.environ['USE_UVM_SPILLING'])
             #print("spill ", (ptr_type, target), f", size: {self._size}, owner.nbytes: {self._owner.nbytes}, owner.nbytes: {self._owner}")
-
+            SPILL_BY_PREFETCH = eval(os.environ['SPILL_BY_PREFETCH'])
             if (ptr_type, target) == ("gpu", "cpu"):
                 with annotate(
                     message="SpillDtoH",
                     color=_get_color_for_nvtx("SpillDtoH"),
                     domain="cudf_python-spill",
                 ):
-                    if USE_UVM_SPILLING:
+                    if SPILL_BY_PREFETCH:
                         host_mem = (self._ptr, self._owner)
 
-                        err, = cuda.cudart.cudaMemAdvise(self._ptr, self._size, cuda.cudart.cudaMemoryAdvise.cudaMemAdviseUnsetReadMostly, 0)
-                        assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemAdvise fail: {err}"
-                        err, = cuda.cudart.cudaMemAdvise(self._ptr, self._size, cuda.cudart.cudaMemoryAdvise.cudaMemAdviseUnsetPreferredLocation, 0)
-                        assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemAdviseUnsetPreferredLocation fail: {err}"
+                        # err, = cuda.cudart.cudaMemAdvise(self._ptr, self._size, cuda.cudart.cudaMemoryAdvise.cudaMemAdviseUnsetReadMostly, 0)
+                        # assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemAdvise fail: {err}"
+                        # err, = cuda.cudart.cudaMemAdvise(self._ptr, self._size, cuda.cudart.cudaMemoryAdvise.cudaMemAdviseUnsetPreferredLocation, 0)
+                        # assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemAdviseUnsetPreferredLocation fail: {err}"
 
                         err, = cuda.cudart.cudaMemPrefetchAsync(self._ptr, self._size, cuda.cudart.cudaCpuDeviceId, 0)
                         assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemPrefetchAsync fail: {err}"
@@ -240,11 +246,11 @@ class SpillableBufferOwner(BufferOwner):
                     color=_get_color_for_nvtx("SpillHtoD"),
                     domain="cudf_python-spill",
                 ):
-                    if USE_UVM_SPILLING:
+                    if SPILL_BY_PREFETCH:
                         self._ptr, self._owner = self._ptr_desc.pop("memoryview")
 
-                        err, = cuda.cudart.cudaMemAdvise(self._ptr, self._size, cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation, 0)
-                        assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemAdviseSetPreferredLocation fail: {err}"
+                        # err, = cuda.cudart.cudaMemAdvise(self._ptr, self._size, cuda.cudart.cudaMemoryAdvise.cudaMemAdviseSetPreferredLocation, 0)
+                        # assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemAdviseSetPreferredLocation fail: {err}"
 
                         err, = cuda.cudart.cudaMemPrefetchAsync(self._ptr, self._size, 0, 0)
                         assert err == cuda.cudart.cudaError_t.cudaSuccess, f"cudaMemPrefetchAsync fail: {err}"
