@@ -23,6 +23,7 @@
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/utilities/default_stream.hpp>
+#include <cudf/detail/utilities/stream_pool.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 
@@ -79,7 +80,13 @@ std::unique_ptr<table> gather(table_view const& source_table,
   return gather(source_table, map_col, bounds_policy, neg_indices, stream, mr);
 }
 
+void prefetch(column_view const& col) {
+
+
+}
+
 }  // namespace detail
+
 
 std::unique_ptr<table> gather(table_view const& source_table,
                               column_view const& gather_map,
@@ -92,7 +99,37 @@ std::unique_ptr<table> gather(table_view const& source_table,
   auto index_policy = is_unsigned(gather_map.type()) ? detail::negative_index_policy::NOT_ALLOWED
                                                      : detail::negative_index_policy::ALLOWED;
 
-  return detail::gather(source_table, gather_map, bounds_policy, index_policy, stream, mr);
+  // auto streams = cudf::detail::fork_streams(stream, 1);
+  std::vector<rmm::cuda_stream_view> streams = {stream};
+  std::cout << "gather() - stream.value(): " << stream.value() << ", streams: " << streams[0] << std::endl;
+  for(int i=0; i<source_table.num_columns(); i++) {
+    const auto &col = source_table.column(i);
+    const int *data = col.data<int>();
+    // std::cout << "data: " << data << ", bytes:" << col.size() * cudf::size_of(col.type()) << std::endl;
+    CUDF_CUDA_TRY(cudaMemPrefetchAsync(data, col.size() * cudf::size_of(col.type()), 0, streams[0]));
+  }
+  {
+    const auto &col = gather_map;
+    const int *data = col.data<int>();
+    std::cout << "gather_map - data: " << data << ", bytes:" << col.size() * cudf::size_of(col.type()) << std::endl;
+    CUDF_CUDA_TRY(cudaMemPrefetchAsync(data, col.size() * cudf::size_of(col.type()), 0, streams[0]));
+  }
+
+  // cudf::detail::join_streams(streams, stream);
+
+  auto ret = detail::gather(source_table, gather_map, bounds_policy, index_policy, stream, mr);
+
+  // for(int i=0; i<source_table.num_columns(); i++) {
+  //   const auto &col = source_table.column(i);
+  //   const int *data = col.data<int>();
+  //   std::cout << "spill - data: " << data << ", bytes:" << col.size() * cudf::size_of(col.type()) << std::endl;
+  //   CUDF_CUDA_TRY(cudaMemPrefetchAsync(data, col.size() * cudf::size_of(col.type()), cudaCpuDeviceId, streams[0]));
+  // }
+
+  // std::cout << "data: " << data << ", bytes:" << col.size() * cudf::size_of(col.type()) << std::endl;
+  // CUDF_CUDA_TRY(cudaMemPrefetchAsync(data, col.size() * cudf::size_of(col.type()), 0, streams[0]));
+
+  return ret;
 }
 
 }  // namespace cudf
