@@ -36,6 +36,8 @@
 
 #include <thrust/pair.h>
 
+#include <cudf/detail/nvtx/ranges.hpp>
+
 namespace cudf {
 namespace io {
 namespace detail {
@@ -51,14 +53,19 @@ namespace detail {
  */
 inline rmm::device_buffer create_data(data_type type,
                                       size_type size,
+                                      bool zero_fill,
                                       rmm::cuda_stream_view stream,
                                       rmm::device_async_resource_ref mr)
 {
+  // stream.synchronize();
+  CUDF_FUNC_RANGE();
   std::size_t data_size = size_of(type) * size;
 
   rmm::device_buffer data(data_size, stream, mr);
-  CUDF_CUDA_TRY(cudaMemsetAsync(data.data(), 0, data_size, stream.value()));
-
+  if (zero_fill) {
+    CUDF_CUDA_TRY(cudaMemsetAsync(data.data(), 0, data_size, stream.value()));
+  }
+  // stream.synchronize();
   return data;
 }
 
