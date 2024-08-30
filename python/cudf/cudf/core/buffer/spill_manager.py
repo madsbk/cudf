@@ -236,7 +236,9 @@ class SpillManager:
         self._device_memory_limit = device_memory_limit
         self.statistics = SpillStatistics(statistic_level)
 
-    def _out_of_memory_handle(self, nbytes: int, *, retry_once=True) -> bool:
+    def _out_of_memory_handle(
+        self, nbytes: int, *, retry_once=True, verbose=False
+    ) -> bool:
         """Try to handle an out-of-memory error by spilling
 
         This can by used as the callback function to RMM's
@@ -272,12 +274,13 @@ class SpillManager:
             return self._out_of_memory_handle(nbytes, retry_once=False)
 
         # TODO: write to log instead of stdout
-        print(
-            f"[WARNING] RMM allocation of {format_bytes(nbytes)} bytes "
-            "failed, spill-on-demand couldn't find any device memory to "
-            f"spill:\n{repr(self)}\ntraceback:\n{get_traceback()}\n"
-            f"{self.statistics}"
-        )
+        if verbose:
+            print(
+                f"[WARNING] RMM allocation of {format_bytes(nbytes)} bytes "
+                "failed, spill-on-demand couldn't find any device memory to "
+                f"spill:\n{repr(self)}\ntraceback:\n{get_traceback()}\n"
+                f"{self.statistics}"
+            )
         return False  # Since we didn't find anything to spill, we give up
 
     def add(self, buffer: SpillableBufferOwner) -> None:
@@ -436,7 +439,7 @@ def get_global_manager() -> SpillManager | None:
     return _global_manager
 
 
-def set_spill_on_demand_globally() -> None:
+def set_spill_on_demand_globally(enable_oom_alternate: bool = True) -> None:
     """Enable spill on demand in the current global spill manager.
 
     Warning: this modifies the current RMM memory resource. A memory resource
@@ -469,6 +472,19 @@ def set_spill_on_demand_globally() -> None:
             mr, manager._out_of_memory_handle
         )
     )
+
+    if enable_oom_alternate:
+        _, total_dev_mem = rmm.mr.available_device_memory()
+        main_mr_limit = int(total_dev_mem * 0.8)
+        print("set uvm on OOM error - rmm.mr.main_mr_limit: ", main_mr_limit)
+
+        mr = rmm.mr.get_current_device_resource()
+        mr = rmm.mr.LimitingResourceAdaptor(mr, allocation_limit=main_mr_limit)
+        rmm.mr.set_current_device_resource(
+            rmm.mr.FailureAlternateResourceAdaptor(
+                mr, rmm.mr.ManagedMemoryResource()
+            )
+        )
 
 
 @contextmanager
