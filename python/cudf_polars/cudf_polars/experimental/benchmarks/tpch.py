@@ -41,7 +41,7 @@ parser.add_argument(
     "--executor",
     default="dask",
     type=str,
-    choices=["dask", "dask-experimental", "pylibcudf", "polars"],
+    choices=["dask", "dask-cuda", "dask-experimental", "pylibcudf", "polars"],
     help="Executor.",
 )
 parser.add_argument(
@@ -216,6 +216,23 @@ def q18(args):
 
 def run(args):
     """Run the benchmark once."""
+    executor = args.executor
+
+    if executor == "dask-cuda" and not args.debug:
+        from dask_cuda import LocalCUDACluster
+        from distributed import Client
+
+        client = Client(
+            LocalCUDACluster(
+                n_workers=1,
+                dashboard_address=":8585",
+                rmm_pool_size=0.9,
+                jit_unspill=True,
+            )
+        )
+    else:
+        client = None
+
     t0 = time.time()
 
     q_id = args.query
@@ -230,7 +247,6 @@ def run(args):
     else:
         raise NotImplementedError(f"Query {q_id} not implemented.")
 
-    executor = args.executor
     if executor == "polars":
         result = q.collect()
     else:
@@ -255,6 +271,9 @@ def run(args):
     t1 = time.time()
     print(result)
     print(f"time is {t1-t0}")
+
+    if client is not None:
+        client.close()
 
 
 if __name__ == "__main__":

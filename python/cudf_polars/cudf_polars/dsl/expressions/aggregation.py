@@ -124,6 +124,18 @@ class Agg(Expr):
         "linear": plc.types.Interpolation.LINEAR,
     }
 
+    def __reduce__(self):
+        """Pickle an Agg object."""
+        return (
+            type(self),
+            (
+                self.dtype,
+                self.name,
+                self.options,
+                *self.children,
+            ),
+        )
+
     def collect_agg(self, *, depth: int) -> AggInfo:
         """Collect information about aggregations in groupbys."""
         if depth >= 1:

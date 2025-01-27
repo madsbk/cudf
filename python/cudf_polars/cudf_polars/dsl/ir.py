@@ -840,6 +840,21 @@ class Reduce(IR):
         return DataFrame(columns)
 
 
+class AggInfoWrapper:
+    """Wrap an GropuBy AggInfo sequence."""
+
+    agg_requests: Sequence[expr.NamedExpr]
+    agg_infos: Sequence[expr.AggInfo]
+
+    def __init__(self, agg_requests: Sequence[expr.NamedExpr]):
+        self.agg_requests = tuple(agg_requests)
+        self.agg_infos = [req.collect_agg(depth=0) for req in self.agg_requests]
+
+    def __reduce__(self):
+        """Pickle an AggInfoWrapper object."""
+        return (AggInfoWrapper, (self.agg_requests,))
+
+
 class GroupBy(IR):
     """Perform a groupby."""
 
@@ -883,13 +898,15 @@ class GroupBy(IR):
             raise NotImplementedError("dynamic group by")
         if any(GroupBy.check_agg(a.value) > 1 for a in self.agg_requests):
             raise NotImplementedError("Nested aggregations in groupby")
-        self.agg_infos = [req.collect_agg(depth=0) for req in self.agg_requests]
+        # self.agg_infos = [req.collect_agg(depth=0) for req in self.agg_requests]
         self._non_child_args = (
             self.keys,
             self.agg_requests,
             maintain_order,
-            options,
-            self.agg_infos,
+            # options,
+            # self.agg_infos,
+            {"slice": options.slice},
+            AggInfoWrapper(self.agg_requests),
         )
 
     @staticmethod
@@ -927,7 +944,8 @@ class GroupBy(IR):
         agg_requests: Sequence[expr.NamedExpr],
         maintain_order: bool,  # noqa: FBT001
         options: Any,
-        agg_infos: Sequence[expr.AggInfo],
+        # agg_infos: Sequence[expr.AggInfo],
+        agg_info_wrapper: AggInfoWrapper,
         df: DataFrame,
     ):
         """Evaluate and return a dataframe."""
@@ -947,7 +965,7 @@ class GroupBy(IR):
         # TODO: uniquify
         requests = []
         replacements: list[expr.Expr] = []
-        for info in agg_infos:
+        for info in agg_info_wrapper.agg_infos:
             for pre_eval, req, rep in info.requests:
                 if pre_eval is None:
                     # A count aggregation, doesn't touch the column,
@@ -1012,7 +1030,7 @@ class GroupBy(IR):
                     ordered_table.columns(), broadcasted, strict=True
                 )
             ]
-        return DataFrame(broadcasted).slice(options.slice)
+        return DataFrame(broadcasted).slice(options.get("slice"))
 
 
 class ConditionalJoin(IR):
