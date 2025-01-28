@@ -21,7 +21,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "query",
     type=int,
-    choices=[1, 5, 10, 18],
+    choices=[1, 5, 6, 9, 10, 18],
     help="Query number.",
 )
 parser.add_argument(
@@ -43,6 +43,12 @@ parser.add_argument(
     type=str,
     choices=["dask", "dask-cuda", "dask-experimental", "pylibcudf", "polars"],
     help="Executor.",
+)
+parser.add_argument(
+    "--n-workers",
+    default=1,
+    type=int,
+    help="Number of Dask-CUDA workers (requires dask-cuda executor).",
 )
 parser.add_argument(
     "--blocksize",
@@ -128,6 +134,69 @@ def q5(args):
         .group_by("n_name")
         .agg(pl.sum("revenue"))
         .sort(by="revenue", descending=True)
+    )
+
+
+def q6(args):
+    """Query 6."""
+    path = args.path
+    suffix = args.suffix
+    lineitem = get_data(path, "lineitem", suffix)
+
+    var1 = date(1994, 1, 1)
+    var2 = date(1995, 1, 1)
+    var3 = 0.05
+    var4 = 0.07
+    var5 = 24
+
+    return (
+        lineitem.filter(pl.col("l_shipdate").is_between(var1, var2, closed="left"))
+        .filter(pl.col("l_discount").is_between(var3, var4))
+        .filter(pl.col("l_quantity") < var5)
+        .with_columns(
+            (pl.col("l_extendedprice") * pl.col("l_discount")).alias("revenue")
+        )
+        .select(pl.sum("revenue"))
+    )
+
+
+def q9(args):
+    """Query 9."""
+    path = args.path
+    suffix = args.suffix
+    lineitem = get_data(path, "lineitem", suffix)
+    nation = get_data(path, "nation", suffix)
+    orders = get_data(path, "orders", suffix)
+    part = get_data(path, "part", suffix)
+    partsupp = get_data(path, "partsupp", suffix)
+    supplier = get_data(path, "supplier", suffix)
+
+    return (
+        part.join(partsupp, left_on="p_partkey", right_on="ps_partkey")
+        .join(supplier, left_on="ps_suppkey", right_on="s_suppkey")
+        .join(
+            lineitem,
+            left_on=["p_partkey", "ps_suppkey"],
+            right_on=["l_partkey", "l_suppkey"],
+        )
+        .join(orders, left_on="l_orderkey", right_on="o_orderkey")
+        .join(nation, left_on="s_nationkey", right_on="n_nationkey")
+        .filter(pl.col("p_name").str.contains("green"))
+        .select(
+            pl.col("n_name").alias("nation"),
+            pl.col("o_orderdate").dt.year().alias("o_year"),
+            (
+                pl.col("l_extendedprice") * (1 - pl.col("l_discount"))
+                - pl.col("ps_supplycost") * pl.col("l_quantity")
+            ).alias("amount"),
+        )
+        .group_by("nation", "o_year")
+        .agg(
+            pl.sum("amount")
+            # .round(2)  # TODO: Support `round`
+            .alias("sum_profit")
+        )
+        .sort(by=["nation", "o_year"], descending=[False, True])
     )
 
 
@@ -224,10 +293,11 @@ def run(args):
 
         client = Client(
             LocalCUDACluster(
-                n_workers=1,
+                n_workers=args.n_workers,
                 dashboard_address=":8585",
                 rmm_pool_size=0.9,
-                jit_unspill=True,
+                # jit_unspill=True,
+                enable_cudf_spill=True,
             )
         )
     else:
@@ -240,6 +310,10 @@ def run(args):
         q = q1(args)
     elif q_id == 5:
         q = q5(args)
+    elif q_id == 6:
+        q = q6(args)
+    elif q_id == 9:
+        q = q9(args)
     elif q_id == 10:
         q = q10(args)
     elif q_id == 18:
