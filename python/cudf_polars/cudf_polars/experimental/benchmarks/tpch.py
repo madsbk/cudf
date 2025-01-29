@@ -287,7 +287,7 @@ def run(args):
     """Run the benchmark once."""
     executor = args.executor
 
-    if executor == "dask-cuda" and not args.debug:
+    if executor == "dask-cuda":
         from dask_cuda import LocalCUDACluster
         from distributed import Client
 
@@ -296,8 +296,7 @@ def run(args):
                 n_workers=args.n_workers,
                 dashboard_address=":8585",
                 rmm_pool_size=0.9,
-                # jit_unspill=True,
-                enable_cudf_spill=True,
+                jit_unspill=True,
             )
         )
     else:
