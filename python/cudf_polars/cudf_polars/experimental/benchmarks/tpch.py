@@ -295,8 +295,8 @@ def run(args):
             LocalCUDACluster(
                 n_workers=args.n_workers,
                 dashboard_address=":8585",
-                rmm_pool_size=0.9,
-                jit_unspill=True,
+                rmm_pool_size=0.8,
+                rmm_managed_memory=True,
             )
         )
     else:
@@ -343,7 +343,7 @@ def run(args):
 
     t1 = time.time()
     print(result)
-    print(f"time is {t1-t0}")
+    print(f"time is {t1 - t0}")
 
     if client is not None:
         client.close()

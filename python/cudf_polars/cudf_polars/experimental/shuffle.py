@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import operator
-from functools import reduce
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -53,7 +52,7 @@ class Shuffle(IR):
         self.schema = schema
         self.keys = keys
         self.options = options
-        self._non_child_args = ()
+        self._non_child_args = (schema, keys, options)
         self.children = (df,)
 
     def get_hashable(self) -> Hashable:
@@ -67,9 +66,15 @@ class Shuffle(IR):
         )
 
     @classmethod
-    def do_evaluate(cls, df: DataFrame):  # pragma: no cover
+    def do_evaluate(
+        cls,
+        schema: Schema,
+        keys: tuple[NamedExpr, ...],
+        options: dict[str, Any],
+        df: DataFrame,
+    ):  # pragma: no cover
         """Evaluate and return a dataframe."""
-        # Single-partition logic is a no-op
+        # Single-partition Shuffle evaluation is a no-op
         return df
 
 
@@ -167,25 +172,20 @@ def _(
     # be handled separately.
     from cudf_polars.experimental.parallel import PartitionInfo
 
-    # Extract child partitioning
-    children, _partition_info = zip(*(rec(c) for c in ir.children), strict=True)
-    partition_info = reduce(operator.or_, _partition_info)
-    pi = partition_info[children[0]]
+    (child,) = ir.children
 
-    # Check if we are already shuffled or update partition_info
-    if ir.keys == pi.partitioned_on:
-        # Already shuffled!
-        new_node = children[0]
-    else:
-        new_node = ir.reconstruct(children)
-        partition_info[new_node] = PartitionInfo(
-            # Default shuffle preserves partition count
-            count=pi.count,
-            # Add partitioned_on info
-            partitioned_on=ir.keys,
-        )
-
-    return new_node, partition_info
+    new_child, pi = rec(child)
+    if pi[new_child].count == 1 or ir.keys == pi[new_child].partitioned_on:
+        # Already shuffled
+        return new_child, pi
+    new_node = ir.reconstruct([new_child])
+    pi[new_node] = PartitionInfo(
+        # Default shuffle preserves partition count
+        count=pi[new_child].count,
+        # Add partitioned_on info
+        partitioned_on=ir.keys,
+    )
+    return new_node, pi
 
 
 @generate_ir_tasks.register(Shuffle)
