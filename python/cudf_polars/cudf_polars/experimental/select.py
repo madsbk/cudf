@@ -4,19 +4,48 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from cudf_polars.dsl.expr import Agg
+from cudf_polars.containers import DataFrame
+from cudf_polars.dsl.expressions.base import NamedExpr
 from cudf_polars.dsl.ir import Select
 from cudf_polars.dsl.traversal import traversal
-from cudf_polars.experimental.base import PartitionInfo
-from cudf_polars.experimental.dispatch import lower_ir_node
+from cudf_polars.experimental.base import PartitionInfo, get_key_name
+from cudf_polars.experimental.dispatch import generate_ir_tasks, lower_ir_node
+from cudf_polars.experimental.expressions import (
+    FusedExpr,
+    decompose_expr_graph,
+    extract_partition_counts,
+    make_fusedexpr_graph,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import MutableMapping
+    from collections.abc import MutableMapping, Sequence
 
+    from cudf_polars.containers import Column
+    from cudf_polars.dsl.expressions.base import Expr
     from cudf_polars.dsl.ir import IR
     from cudf_polars.experimental.parallel import LowerIRTransformer
+
+
+def decompose_select(
+    ir: Select,
+    child: IR,
+    partition_info: MutableMapping[IR, PartitionInfo],
+) -> tuple[IR, MutableMapping[IR, PartitionInfo]]:
+    """Decompose a Select expression (if possible)."""
+    exprs = [decompose_expr_graph(ne.value) for ne in ir.exprs]
+    new_node = Select(
+        ir.schema,
+        [NamedExpr(ir.exprs[i].name, exprs[i]) for i in range(len(exprs))],
+        ir.should_broadcast,
+        child,
+    )
+    expr_partition_info = extract_partition_counts(exprs, partition_info[child].count)
+    partition_info[new_node] = PartitionInfo(
+        count=max(expr_partition_info[e] for e in exprs)
+    )
+    return new_node, partition_info
 
 
 @lower_ir_node.register(Select)
@@ -25,31 +54,90 @@ def _(
 ) -> tuple[IR, MutableMapping[IR, PartitionInfo]]:
     child, partition_info = rec(ir.children[0])
     pi = partition_info[child]
-    new_node: SelectAgg | Select
-
-    # Check if we are directly selecting an Agg.
-    # To handle arbitrary Agg expressions, we will need
-    # a mechanism to decompose an Expr graph containing
-    # 1+ nodes that are non pointwise.
-    if pi.count > 1 and all(isinstance(expr.value, Agg) for expr in ir.exprs):
-        from cudf_polars.experimental.agg import SelectAgg
-
-        new_node = SelectAgg(
-            ir.schema,
-            ir.exprs,
-            ir.should_broadcast,
-            child,
-        )
-        partition_info[new_node] = PartitionInfo(count=1)
-        return new_node, partition_info
-
-    elif pi.count > 1 and not all(
+    if pi.count > 1 and not all(
         expr.is_pointwise for expr in traversal([e.value for e in ir.exprs])
     ):
-        # TODO: Handle non-pointwise expressions.
-        raise NotImplementedError(
-            f"Selection {ir} does not support multiple partitions."
-        )
+        # Try decomposing the underlying expressions
+        return decompose_select(ir, child, partition_info)
+
     new_node = ir.reconstruct([child])
     partition_info[new_node] = pi
     return new_node, partition_info
+
+
+def construct_dataframe(columns: Sequence[Column], names: Sequence[str]) -> DataFrame:
+    """Construct a DataFrame from a sequence of Columns."""
+    return DataFrame(
+        [column.rename(name) for column, name in zip(columns, names, strict=False)]
+    )
+
+
+def build_fusedexpr_select_graph(
+    ir: Select, partition_info: MutableMapping[IR, PartitionInfo]
+) -> MutableMapping[Any, Any]:
+    """Build complex Select graph."""
+    (child,) = ir.children
+    child_name = get_key_name(child)
+    child_count = partition_info[child].count
+
+    # Build Graph to produce a column for each
+    # NamedExpr element of ir.exprs
+    graph: MutableMapping[Any, Any] = {}
+    expr_partition_counts: MutableMapping[Expr, int] = {}
+    roots = []
+    for ne in ir.exprs:
+        assert isinstance(ne.value, FusedExpr), f"{ne.value} is not a FusedExpr"
+        expr: FusedExpr = ne.value
+        roots.append(expr)
+        expr_partition_counts = extract_partition_counts(
+            [expr],
+            child_count,
+            update=expr_partition_counts,
+        )
+        for node in list(traversal([expr]))[::-1]:
+            assert isinstance(node, FusedExpr), f"{node} is not a FusedExpr"
+            graph.update(make_fusedexpr_graph(node, child_name, expr_partition_counts))
+
+    # Add task(s) to select the final columns
+    name = get_key_name(ir)
+    count = max(expr_partition_counts[root] for root in roots)
+    expr_names = [get_key_name(root) for root in roots]
+    expr_bcast = [expr_partition_counts[root] == 1 for root in roots]
+    for i in range(count):
+        graph[(name, i)] = (
+            construct_dataframe,
+            [
+                (name, 0) if bcast else (name, i)
+                for name, bcast in zip(expr_names, expr_bcast, strict=False)
+            ],
+            [ne.name for ne in ir.exprs],
+        )
+
+    return graph
+
+
+@generate_ir_tasks.register(Select)
+def _(
+    ir: Select, partition_info: MutableMapping[IR, PartitionInfo]
+) -> MutableMapping[Any, Any]:
+    # TODO: If we are doing aligned aggregations on multiple
+    # columns at once, we should build a task graph that
+    # evaluates the aligned expressions at the same time
+    # (rather than each task operating on an individual column).
+
+    fused_exprs = [isinstance(ne.value, FusedExpr) for ne in ir.exprs]
+    if any(fused_exprs):
+        # Handle FusedExpr-based graph construction
+        assert all(fused_exprs), "Partial fusion is not supported"
+        return build_fusedexpr_select_graph(ir, partition_info)
+    else:
+        # Simple point-wise graph
+        child_name = get_key_name(ir.children[0])
+        return {
+            key: (
+                ir.do_evaluate,
+                *ir._non_child_args,
+                (child_name, i),
+            )
+            for i, key in enumerate(partition_info[ir].keys(ir))
+        }
