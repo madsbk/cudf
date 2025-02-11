@@ -42,7 +42,6 @@ def _(
                 ir.schema,
                 ir.df.slice(offset, length),
                 ir.projection,
-                ir.predicate,
                 ir.config_options,
             )
             for offset in range(0, nrows, length)

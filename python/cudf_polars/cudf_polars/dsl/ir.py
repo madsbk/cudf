@@ -696,14 +696,12 @@ class DataFrameScan(IR):
     This typically arises from ``q.collect().lazy()``
     """
 
-    __slots__ = ("config_options", "df", "predicate", "projection")
-    _non_child = ("schema", "df", "projection", "predicate", "config_options")
+    __slots__ = ("config_options", "df", "projection")
+    _non_child = ("schema", "df", "projection", "config_options")
     df: Any
     """Polars LazyFrame object."""
     projection: tuple[str, ...] | None
     """List of columns to project out."""
-    predicate: expr.NamedExpr | None
-    """Mask to apply."""
     config_options: dict[str, Any]
     """GPU-specific configuration options"""
 
@@ -712,19 +710,16 @@ class DataFrameScan(IR):
         schema: Schema,
         df: Any,
         projection: Sequence[str] | None,
-        predicate: expr.NamedExpr | None,
         config_options: dict[str, Any],
     ):
         self.schema = schema
         self.df = df
         self.projection = tuple(projection) if projection is not None else None
-        self.predicate = predicate
         self.config_options = config_options
         self._non_child_args = (
             schema,
             pl.DataFrame._from_pydf(df),
             self.projection,
-            predicate,
         )
         self.children = ()
 
@@ -741,7 +736,6 @@ class DataFrameScan(IR):
             schema_hash,
             id(self.df),
             self.projection,
-            self.predicate,
             json.dumps(self.config_options),
         )
 
@@ -751,7 +745,6 @@ class DataFrameScan(IR):
         schema: Schema,
         df: Any,
         projection: tuple[str, ...] | None,
-        predicate: expr.NamedExpr | None,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
         if projection is not None:
