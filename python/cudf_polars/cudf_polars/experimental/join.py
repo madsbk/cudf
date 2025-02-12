@@ -8,15 +8,21 @@ import operator
 from functools import reduce
 from typing import TYPE_CHECKING, Any
 
-from cudf_polars.dsl.ir import Join
+from cudf_polars.dsl.ir import ConditionalJoin, Join
+from cudf_polars.dsl.to_ast import to_ast
 from cudf_polars.experimental.base import PartitionInfo, _concat, get_key_name
-from cudf_polars.experimental.dispatch import generate_ir_tasks, lower_ir_node
+from cudf_polars.experimental.dispatch import (
+    eval_signature,
+    generate_ir_tasks,
+    lower_ir_node,
+)
 from cudf_polars.experimental.shuffle import Shuffle, _partition_dataframe
 
 if TYPE_CHECKING:
-    from collections.abc import MutableMapping
+    from collections.abc import Callable, MutableMapping
 
-    from cudf_polars.dsl.expr import NamedExpr
+    from cudf_polars.containers import DataFrame
+    from cudf_polars.dsl.expr import Expr, NamedExpr
     from cudf_polars.dsl.ir import IR
     from cudf_polars.experimental.parallel import LowerIRTransformer
 
@@ -312,3 +318,24 @@ def _(
                 graph[(out_name, part_out)] = (_concat, _concat_list)
 
         return graph
+
+
+def evaluate_conditional_join(
+    predicate: Expr,
+    *args: Any,
+) -> DataFrame:
+    """Custom evaluation function for ConditionalJoin."""
+    # Convert predicate to ast and call down to do_evaluate.
+    return ConditionalJoin.do_evaluate(to_ast(predicate), *args)
+
+
+@eval_signature.register(ConditionalJoin)
+def _(ir: ConditionalJoin) -> tuple[Callable, tuple[Any, ...]]:
+    # Use evaluate_conditional_join to avoid passing
+    # an ast expr in the task graph.
+    # TODO: Maybe return (ir.do_evaluate, ir._non_child_args)
+    # when there is no distributed client?
+    return evaluate_conditional_join, (
+        ir.predicate,
+        *ir._non_child_args[1:],
+    )

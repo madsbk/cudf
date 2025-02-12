@@ -18,12 +18,13 @@ from cudf_polars.dsl.ir import IR, Cache, Filter, HStack, Projection, Union
 from cudf_polars.dsl.traversal import CachingVisitor, traversal
 from cudf_polars.experimental.base import PartitionInfo, _concat, get_key_name
 from cudf_polars.experimental.dispatch import (
+    eval_signature,
     generate_ir_tasks,
     lower_ir_node,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import MutableMapping
+    from collections.abc import Callable, MutableMapping
 
     from cudf_polars.containers import DataFrame
     from cudf_polars.experimental.dispatch import LowerIRTransformer
@@ -157,6 +158,13 @@ def evaluate_dask(ir: IR) -> DataFrame:
     return get(graph, key)
 
 
+@eval_signature.register(IR)
+def _(ir: IR) -> tuple[Callable, tuple[Any, ...]]:
+    # Single-partition default behavior.
+    # This is used by the default version of `generate_ir_tasks`.
+    return ir.do_evaluate, ir._non_child_args
+
+
 @generate_ir_tasks.register(IR)
 def _(
     ir: IR, partition_info: MutableMapping[IR, PartitionInfo]
@@ -177,10 +185,11 @@ def _(
             )  # pragma: no cover
 
     key_name = get_key_name(ir)
+    eval_func, non_child_args = eval_signature(ir)
     return {
         (key_name, 0): (
-            ir.do_evaluate,
-            *ir._non_child_args,
+            eval_func,
+            *non_child_args,
             *((child_name, 0) for child_name in child_names),
         )
     }
