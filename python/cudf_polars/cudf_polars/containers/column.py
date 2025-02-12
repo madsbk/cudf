@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import functools
-import pickle
 from typing import TYPE_CHECKING, Any
 
 from polars.exceptions import InvalidOperationError
@@ -113,8 +112,6 @@ class Column:
         }
         header = {
             "column_kwargs": column_kwargs,
-            # Dask Distributed uses "type-serialized" to dispatch deserialization
-            "type-serialized": pickle.dumps(type(self)),
             "frame_count": 2,
         }
         return header, packed.release()

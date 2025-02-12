@@ -21,7 +21,7 @@ def register() -> None:
     """Register dask serialization routines for DataFrames."""
 
     @cuda_serialize.register((Column, DataFrame))
-    def _(x: Column | DataFrame):
+    def _(x: DataFrame | Column):
         with log_errors():
             header, frames = x.serialize()
             return header, list(frames)  # Dask expect a list of frames
@@ -39,7 +39,7 @@ def register() -> None:
             return Column.deserialize(header, tuple(frames))
 
     @dask_serialize.register((Column, DataFrame))
-    def _(x: Column | DataFrame):
+    def _(x: DataFrame | Column):
         with log_errors():
             header, (metadata, gpudata) = x.serialize()
 
@@ -68,5 +68,9 @@ def register() -> None:
     def _(header, frames) -> Column:
         with log_errors():
             assert len(frames) == 2
+            # Copy the second frame (the gpudata in host memory) back to the gpu
             frames = frames[0], plc.gpumemoryview(rmm.DeviceBuffer.to_device(frames[1]))
+            import pdb
+
+            pdb.set_trace()
             return Column.deserialize(header, frames)
