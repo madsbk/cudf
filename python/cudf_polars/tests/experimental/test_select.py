@@ -53,6 +53,7 @@ def test_select_unsupported_raises(df, engine):
 @pytest.mark.parametrize(
     "aggs",
     [
+        (pl.col("a").sum(),),
         (
             (pl.col("a") + pl.col("b")).sum(),
             (pl.col("a") * 2 + pl.col("b")).alias("d").min(),
