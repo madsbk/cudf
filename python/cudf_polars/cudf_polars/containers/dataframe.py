@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import pyarrow as pa
 
@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence, Set
 
     from typing_extensions import Self
+
+    from cudf_polars.typing import ColumnOptions, DataFrameHeader
 
 
 __all__: list[str] = ["DataFrame"]
@@ -149,7 +151,7 @@ class DataFrame:
 
     @classmethod
     def deserialize(
-        cls, header: Mapping[str, Any], frames: tuple[memoryview, plc.gpumemoryview]
+        cls, header: DataFrameHeader, frames: tuple[memoryview, plc.gpumemoryview]
     ) -> Self:
         """
         Create a DataFrame from a serialized representation returned by `.serialize()`.
@@ -177,7 +179,7 @@ class DataFrame:
 
     def serialize(
         self,
-    ) -> tuple[Mapping[str, Any], tuple[memoryview, plc.gpumemoryview]]:
+    ) -> tuple[DataFrameHeader, tuple[memoryview, plc.gpumemoryview]]:
         """
         Serialize the table into header and frames.
 
@@ -186,20 +188,20 @@ class DataFrame:
 
         To enable dask support, dask serializers must be registered
 
-        >>> from cudf_polars.experimental.dask_serialize import register
-        >>> register()
+            >>> from cudf_polars.experimental.dask_serialize import register
+            >>> register()
 
         Returns
         -------
         header
             A dict containing any picklable metadata required to reconstruct the object.
         frames
-            Two-tuple of frames suitable for passing to `unpack_from_memoryviews`
+            Two-tuple of frames suitable for passing to `plc.contiguous_split.unpack_from_memoryviews`
         """
         packed = plc.contiguous_split.pack(self.table)
 
         # Keyword arguments for `Column.__init__`.
-        columns_kwargs = [
+        columns_kwargs: list[ColumnOptions] = [
             {
                 "is_sorted": col.is_sorted,
                 "order": col.order,
@@ -208,7 +210,7 @@ class DataFrame:
             }
             for col in self.columns
         ]
-        header = {
+        header: DataFrameHeader = {
             "columns_kwargs": columns_kwargs,
             "frame_count": 2,
         }
