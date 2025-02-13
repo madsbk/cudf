@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from dask.distributed import Client  # , LocalCluster
-from dask_cuda import LocalCUDACluster as LocalCluster
+from dask import config
+from dask.distributed import Client, LocalCluster
+
+# Avoid "Sending large graph of size ..." warnings
+# (We expect these for tests using literal/random arrays)
+config.set({"distributed.admin.large-graph-warning-threshold": "20MB"})
 
 
 @pytest.fixture(params=[False, True], ids=["no_nulls", "nulls"], scope="session")
