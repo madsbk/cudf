@@ -8,7 +8,7 @@ from functools import singledispatch
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, MutableMapping
+    from collections.abc import MutableMapping
     from typing import TypeAlias
 
     from cudf_polars.dsl.ir import IR
@@ -80,28 +80,5 @@ def generate_ir_tasks(
     See Also
     --------
     task_graph
-    """
-    raise AssertionError(f"Unhandled type {type(ir)}")  # pragma: no cover
-
-
-@singledispatch
-def eval_signature(ir: IR) -> tuple[Callable, tuple[Any, ...]]:
-    """
-    Return the function and non-child arguments for IR evaluation.
-
-    Parameters
-    ----------
-    ir
-        IR node to be evaluated.
-
-    Returns
-    -------
-    eval_func, eval_args
-        The callable evaluation function and non-child arguments
-        needed to evaluate an IR node.
-
-    Notes
-    -----
-    This function may be used to build a task graph with generate_ir_tasks.
     """
     raise AssertionError(f"Unhandled type {type(ir)}")  # pragma: no cover
