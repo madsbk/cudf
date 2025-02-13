@@ -828,7 +828,7 @@ class Reduce(IR):
 
 
 class AggInfoWrapper:
-    """Wrap an GropuBy AggInfo sequence."""
+    """Serializable wrapper for GroupBy aggregation info."""
 
     agg_requests: Sequence[expr.NamedExpr]
     agg_infos: Sequence[expr.AggInfo]
@@ -840,6 +840,15 @@ class AggInfoWrapper:
     def __reduce__(self):
         """Pickle an AggInfoWrapper object."""
         return (AggInfoWrapper, (self.agg_requests,))
+
+
+class GroupbyOptions:
+    """Serializable wrapper for polars GroupbyOptions."""
+
+    def __init__(self, polars_groupby_options: Any):
+        self.dynamic = polars_groupby_options.dynamic
+        self.rolling = polars_groupby_options.rolling
+        self.slice = polars_groupby_options.slice
 
 
 class GroupBy(IR):
@@ -875,7 +884,7 @@ class GroupBy(IR):
         self.keys = tuple(keys)
         self.agg_requests = tuple(agg_requests)
         self.maintain_order = maintain_order
-        self.options = options
+        self.options = GroupbyOptions(options)
         self.children = (df,)
         if self.options.rolling:
             raise NotImplementedError(
@@ -885,14 +894,11 @@ class GroupBy(IR):
             raise NotImplementedError("dynamic group by")
         if any(GroupBy.check_agg(a.value) > 1 for a in self.agg_requests):
             raise NotImplementedError("Nested aggregations in groupby")
-        # self.agg_infos = [req.collect_agg(depth=0) for req in self.agg_requests]
         self._non_child_args = (
             self.keys,
             self.agg_requests,
             maintain_order,
-            # options,
-            # self.agg_infos,
-            {"slice": options.slice},
+            self.options,
             AggInfoWrapper(self.agg_requests),
         )
 
@@ -931,7 +937,6 @@ class GroupBy(IR):
         agg_requests: Sequence[expr.NamedExpr],
         maintain_order: bool,  # noqa: FBT001
         options: Any,
-        # agg_infos: Sequence[expr.AggInfo],
         agg_info_wrapper: AggInfoWrapper,
         df: DataFrame,
     ):
@@ -1017,7 +1022,7 @@ class GroupBy(IR):
                     ordered_table.columns(), broadcasted, strict=True
                 )
             ]
-        return DataFrame(broadcasted).slice(options.get("slice"))
+        return DataFrame(broadcasted).slice(options.slice)
 
 
 class ConditionalJoin(IR):
