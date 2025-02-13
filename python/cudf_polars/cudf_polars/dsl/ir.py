@@ -100,7 +100,7 @@ def broadcast(*columns: Column, target_length: int | None = None) -> list[Column
     """
     if len(columns) == 0:
         return []
-    lengths: set[int] = {column.obj.size() for column in columns}
+    lengths: set[int] = {column.size for column in columns}
     if lengths == {1}:
         if target_length is None:
             return list(columns)
@@ -116,7 +116,7 @@ def broadcast(*columns: Column, target_length: int | None = None) -> list[Column
             )
     return [
         column
-        if column.obj.size() != 1
+        if column.size != 1
         else Column(
             plc.Column.from_scalar(column.obj_scalar, nrows),
             is_sorted=plc.types.Sorted.YES,
@@ -823,7 +823,7 @@ class Reduce(IR):
     ) -> DataFrame:  # pragma: no cover; not exposed by polars yet
         """Evaluate and return a dataframe."""
         columns = broadcast(*(e.evaluate(df) for e in exprs))
-        assert all(column.obj.size() == 1 for column in columns)
+        assert all(column.size == 1 for column in columns)
         return DataFrame(columns)
 
 
@@ -854,6 +854,28 @@ class GroupbyOptions:
 class GroupBy(IR):
     """Perform a groupby."""
 
+    class AggInfos:
+        """Serializable wrapper for GroupBy aggregation info."""
+
+        agg_requests: Sequence[expr.NamedExpr]
+        agg_infos: Sequence[expr.AggInfo]
+
+        def __init__(self, agg_requests: Sequence[expr.NamedExpr]):
+            self.agg_requests = tuple(agg_requests)
+            self.agg_infos = [req.collect_agg(depth=0) for req in self.agg_requests]
+
+        def __reduce__(self):
+            """Pickle an AggInfos object."""
+            return (type(self), (self.agg_requests,))
+
+    class GroupbyOptions:
+        """Serializable wrapper for polars GroupbyOptions."""
+
+        def __init__(self, polars_groupby_options: Any):
+            self.dynamic = polars_groupby_options.dynamic
+            self.rolling = polars_groupby_options.rolling
+            self.slice = polars_groupby_options.slice
+
     __slots__ = (
         "agg_infos",
         "agg_requests",
@@ -868,7 +890,7 @@ class GroupBy(IR):
     """Aggregation expressions."""
     maintain_order: bool
     """Preserve order in groupby."""
-    options: Any
+    options: GroupbyOptions
     """Arbitrary options."""
 
     def __init__(
@@ -884,7 +906,7 @@ class GroupBy(IR):
         self.keys = tuple(keys)
         self.agg_requests = tuple(agg_requests)
         self.maintain_order = maintain_order
-        self.options = GroupbyOptions(options)
+        self.options = self.GroupbyOptions(options)
         self.children = (df,)
         if self.options.rolling:
             raise NotImplementedError(
@@ -899,7 +921,7 @@ class GroupBy(IR):
             self.agg_requests,
             maintain_order,
             self.options,
-            AggInfoWrapper(self.agg_requests),
+            self.AggInfos(self.agg_requests),
         )
 
     @staticmethod
@@ -936,8 +958,8 @@ class GroupBy(IR):
         keys_in: Sequence[expr.NamedExpr],
         agg_requests: Sequence[expr.NamedExpr],
         maintain_order: bool,  # noqa: FBT001
-        options: Any,
-        agg_info_wrapper: AggInfoWrapper,
+        options: GroupbyOptions,
+        agg_info_wrapper: AggInfos,
         df: DataFrame,
     ):
         """Evaluate and return a dataframe."""
@@ -1043,6 +1065,20 @@ class PredicateWrapper:
 class ConditionalJoin(IR):
     """A conditional inner join of two dataframes on a predicate."""
 
+    class Predicate:
+        """Serializable wrapper for a predicate expression."""
+
+        predicate: expr.Expr
+        ast: plc.expressions.Expression
+
+        def __init__(self, predicate: expr.Expr):
+            self.predicate = predicate
+            self.ast = to_ast(predicate)
+
+        def __reduce__(self):
+            """Pickle a Predicate object."""
+            return (type(self), (self.predicate,))
+
     __slots__ = ("ast_predicate", "options", "predicate")
     _non_child = ("schema", "predicate", "options")
     predicate: expr.Expr
@@ -1075,7 +1111,7 @@ class ConditionalJoin(IR):
         self.predicate = predicate
         self.options = options
         self.children = (left, right)
-        predicate_wrapper = PredicateWrapper(predicate)
+        predicate_wrapper = self.Predicate(predicate)
         _, join_nulls, zlice, suffix, coalesce, maintain_order = self.options
         # Preconditions from polars
         assert not join_nulls
@@ -1090,7 +1126,7 @@ class ConditionalJoin(IR):
     @classmethod
     def do_evaluate(
         cls,
-        predicate_wrapper: PredicateWrapper,
+        predicate_wrapper: Predicate,
         zlice: tuple[int, int] | None,
         suffix: str,
         maintain_order: Literal["none", "left", "right", "left_right", "right_left"],
