@@ -1025,6 +1025,21 @@ class GroupBy(IR):
         return DataFrame(broadcasted).slice(options.slice)
 
 
+class PredicateWrapper:
+    """Serializable wrapper for a predicate expression."""
+
+    predicate: expr.Expr
+    ast: plc.expressions.Expression
+
+    def __init__(self, predicate: expr.Expr):
+        self.predicate = predicate
+        self.ast = to_ast(predicate)
+
+    def __reduce__(self):
+        """Pickle a PredicateWrapper object."""
+        return (PredicateWrapper, (self.predicate,))
+
+
 class ConditionalJoin(IR):
     """A conditional inner join of two dataframes on a predicate."""
 
@@ -1060,22 +1075,22 @@ class ConditionalJoin(IR):
         self.predicate = predicate
         self.options = options
         self.children = (left, right)
-        self.ast_predicate = to_ast(predicate)
+        predicate_wrapper = PredicateWrapper(predicate)
         _, join_nulls, zlice, suffix, coalesce, maintain_order = self.options
         # Preconditions from polars
         assert not join_nulls
         assert not coalesce
         assert maintain_order == "none"
-        if self.ast_predicate is None:
+        if predicate_wrapper.ast is None:
             raise NotImplementedError(
                 f"Conditional join with predicate {predicate}"
             )  # pragma: no cover; polars never delivers expressions we can't handle
-        self._non_child_args = (self.ast_predicate, zlice, suffix, maintain_order)
+        self._non_child_args = (predicate_wrapper, zlice, suffix, maintain_order)
 
     @classmethod
     def do_evaluate(
         cls,
-        predicate: plc.expressions.Expression,
+        predicate_wrapper: PredicateWrapper,
         zlice: tuple[int, int] | None,
         suffix: str,
         maintain_order: Literal["none", "left", "right", "left_right", "right_left"],
@@ -1083,7 +1098,11 @@ class ConditionalJoin(IR):
         right: DataFrame,
     ) -> DataFrame:
         """Evaluate and return a dataframe."""
-        lg, rg = plc.join.conditional_inner_join(left.table, right.table, predicate)
+        lg, rg = plc.join.conditional_inner_join(
+            left.table,
+            right.table,
+            predicate_wrapper.ast,
+        )
         left = DataFrame.from_table(
             plc.copying.gather(
                 left.table, lg, plc.copying.OutOfBoundsPolicy.DONT_CHECK
