@@ -827,30 +827,6 @@ class Reduce(IR):
         return DataFrame(columns)
 
 
-class AggInfoWrapper:
-    """Serializable wrapper for GroupBy aggregation info."""
-
-    agg_requests: Sequence[expr.NamedExpr]
-    agg_infos: Sequence[expr.AggInfo]
-
-    def __init__(self, agg_requests: Sequence[expr.NamedExpr]):
-        self.agg_requests = tuple(agg_requests)
-        self.agg_infos = [req.collect_agg(depth=0) for req in self.agg_requests]
-
-    def __reduce__(self):
-        """Pickle an AggInfoWrapper object."""
-        return (AggInfoWrapper, (self.agg_requests,))
-
-
-class GroupbyOptions:
-    """Serializable wrapper for polars GroupbyOptions."""
-
-    def __init__(self, polars_groupby_options: Any):
-        self.dynamic = polars_groupby_options.dynamic
-        self.rolling = polars_groupby_options.rolling
-        self.slice = polars_groupby_options.slice
-
-
 class GroupBy(IR):
     """Perform a groupby."""
 
@@ -1045,21 +1021,6 @@ class GroupBy(IR):
                 )
             ]
         return DataFrame(broadcasted).slice(options.slice)
-
-
-class PredicateWrapper:
-    """Serializable wrapper for a predicate expression."""
-
-    predicate: expr.Expr
-    ast: plc.expressions.Expression
-
-    def __init__(self, predicate: expr.Expr):
-        self.predicate = predicate
-        self.ast = to_ast(predicate)
-
-    def __reduce__(self):
-        """Pickle a PredicateWrapper object."""
-        return (PredicateWrapper, (self.predicate,))
 
 
 class ConditionalJoin(IR):
