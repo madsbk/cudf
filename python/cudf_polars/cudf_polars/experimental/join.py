@@ -123,7 +123,7 @@ def _should_bcast_join(
     # 3. The "kind" of join is compatible with a broadcast join
     return (
         not large_shuffled
-        and small_count <= 8  # TODO: Make this configurable
+        and small_count <= 2  # TODO: Make this configurable
         and (
             ir.options[0] == "Inner"
             or (ir.options[0] in ("Left", "Semi", "Anti") and large == left)

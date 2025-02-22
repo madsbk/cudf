@@ -13,6 +13,7 @@ import pyarrow as pa
 import pylibcudf as plc
 
 from cudf_polars.containers import DataFrame
+from cudf_polars.dsl.expr import Col
 from cudf_polars.dsl.ir import IR
 from cudf_polars.experimental.base import _concat, get_key_name
 from cudf_polars.experimental.dispatch import generate_ir_tasks, lower_ir_node
@@ -136,14 +137,32 @@ def _simple_shuffle_graph(
     name_out: str,
     name_in: str,
     keys: tuple[NamedExpr, ...],
+    column_names: list[str],
     count_in: int,
     count_out: int,
 ) -> MutableMapping[Any, Any]:
     """Make a simple all-to-all shuffle graph."""
     split_name = f"split-{name_out}"
     inter_name = f"inter-{name_out}"
-
     graph: MutableMapping[Any, Any] = {}
+
+    _keys = [ne.value for ne in keys]
+    if all(isinstance(k, Col) for k in _keys):
+        shuffle_on = [k.name for k in _keys]
+        try:
+            from rapidsmp.examples.cudf_polars import make_rmp_shuffle_graph
+
+            return make_rmp_shuffle_graph(
+                name_in,
+                name_out,
+                column_names,
+                shuffle_on,
+                count_in,
+                count_out,
+            )
+        except (ImportError, RuntimeError):
+            pass
+
     for part_out in range(count_out):
         _concat_list = []
         for part_in in range(count_in):
@@ -199,6 +218,7 @@ def _(
         get_key_name(ir),
         get_key_name(ir.children[0]),
         ir.keys,
+        list(ir.schema.keys()),
         partition_info[ir.children[0]].count,
         partition_info[ir].count,
     )
