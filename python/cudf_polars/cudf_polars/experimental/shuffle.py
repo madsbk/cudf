@@ -146,8 +146,8 @@ def _simple_shuffle_graph(
     inter_name = f"inter-{name_out}"
     graph: MutableMapping[Any, Any] = {}
 
-    _keys = [ne.value for ne in keys]
-    if all(isinstance(k, Col) for k in _keys):
+    _keys: list[Col] = [ne.value for ne in keys if isinstance(ne.value, Col)]
+    if len(_keys) == len(keys):
         shuffle_on = [k.name for k in _keys]
         try:
             from rapidsmp.examples.cudf_polars import make_rmp_shuffle_graph
@@ -160,7 +160,8 @@ def _simple_shuffle_graph(
                 count_in,
                 count_out,
             )
-        except (ImportError, RuntimeError):
+        except (ImportError, RuntimeError, ValueError):
+            # Fall back to simple task shuffle
             pass
 
     for part_out in range(count_out):
