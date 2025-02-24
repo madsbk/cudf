@@ -30,13 +30,12 @@ if TYPE_CHECKING:
 
 
 try:
-    from rapidsmp.integrations.dask import DaskIntegration
     from rapidsmp.shuffler import partition_and_pack, unpack_and_concat
 
     if TYPE_CHECKING:
         from rapidsmp.shuffler import Shuffler
 
-    class CudfPolarsIntegration(DaskIntegration):
+    class CudfPolarsIntegration:
         """cuDF Polars protocol for Dask integration."""
 
         @staticmethod
