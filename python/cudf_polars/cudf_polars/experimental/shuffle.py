@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 
 import pylibcudf as plc
+import rmm.mr
+from rmm.pylibrmm.stream import DEFAULT_STREAM
 
 from cudf_polars.containers import DataFrame
 from cudf_polars.dsl.expr import Col
@@ -19,12 +21,61 @@ from cudf_polars.experimental.base import _concat, get_key_name
 from cudf_polars.experimental.dispatch import generate_ir_tasks, lower_ir_node
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable, MutableMapping
+    from collections.abc import Hashable, MutableMapping, Sequence
 
     from cudf_polars.dsl.expr import NamedExpr
     from cudf_polars.experimental.dispatch import LowerIRTransformer
     from cudf_polars.experimental.parallel import PartitionInfo
     from cudf_polars.typing import Schema
+
+
+try:
+    from rapidsmp.integrations.dask import DaskIntegration
+    from rapidsmp.shuffler import partition_and_pack, unpack_and_concat
+
+    if TYPE_CHECKING:
+        from rapidsmp.shuffler import Shuffler
+
+    class CudfPolarsIntegration(DaskIntegration):
+        """cuDF Polars protocol for Dask integration."""
+
+        @staticmethod
+        def insert_partition(
+            df: DataFrame,
+            on: Sequence[str],
+            partition_count: int,
+            shuffler: Shuffler,
+        ) -> None:
+            """Add cudf-polars DataFrame chunks to an RMP shuffler."""
+            columns_to_hash = tuple(df.column_names.index(val) for val in on)
+            packed_inputs = partition_and_pack(
+                df.table,
+                columns_to_hash=columns_to_hash,
+                num_partitions=partition_count,
+                stream=DEFAULT_STREAM,
+                device_mr=rmm.mr.get_current_device_resource(),
+            )
+            shuffler.insert_chunks(packed_inputs)
+
+        @staticmethod
+        def extract_partition(
+            partition_id: int,
+            column_names: list[str],
+            shuffler: Shuffler,
+        ) -> DataFrame:
+            """Extract a finished partition from the RMP shuffler."""
+            shuffler.wait_on(partition_id)
+            return DataFrame.from_table(
+                unpack_and_concat(
+                    shuffler.extract(partition_id),
+                    stream=DEFAULT_STREAM,
+                    device_mr=rmm.mr.get_current_device_resource(),
+                ),
+                column_names,
+            )
+except ImportError:
+    # Rapidsmp not supported
+    pass
 
 
 class Shuffle(IR):
@@ -150,17 +201,18 @@ def _simple_shuffle_graph(
     if len(_keys) == len(keys):
         shuffle_on = [k.name for k in _keys]
         try:
-            from rapidsmp.examples.cudf_polars import make_rmp_shuffle_graph
+            from rapidsmp.integrations.dask import rapidsmp_shuffle_graph
 
-            return make_rmp_shuffle_graph(
+            return rapidsmp_shuffle_graph(
                 name_in,
                 name_out,
                 column_names,
                 shuffle_on,
                 count_in,
                 count_out,
+                CudfPolarsIntegration,
             )
-        except (ImportError, RuntimeError, ValueError):
+        except (ImportError, ValueError):
             # Fall back to simple task shuffle
             pass
 
