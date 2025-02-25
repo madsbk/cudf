@@ -3,50 +3,13 @@
 from __future__ import annotations
 
 import pytest
-from dask import config
-from dask.distributed import Client, LocalCluster
 
-# Avoid "Sending large graph of size ..." warnings
-# (We expect these for tests using literal/random arrays)
-config.set({"distributed.admin.large-graph-warning-threshold": "20MB"})
+DISTRIBUTED_CLUSTER_KEY = pytest.StashKey[dict]()
 
 
 @pytest.fixture(params=[False, True], ids=["no_nulls", "nulls"], scope="session")
 def with_nulls(request):
     return request.param
-
-
-class DistributedClusterResource:
-    """Singleton class to manage Distributed cluster and client.
-
-    A singleton class with the purpose of managing a Distributed cluster and
-    client, ensuring only one instance of each exists and lives throughout the
-    entire pytest session.
-    """
-
-    _instance = None
-    _cluster = None
-    _client = None
-
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    def start(self):
-        if self._cluster is None:
-            self._cluster = LocalCluster(n_workers=2)
-        if self._client is None:
-            self._client = Client(self._cluster)
-
-    def stop(self):
-        if self._client is not None:
-            self._client.shutdown()
-            self._client = None
-        if self._cluster is not None:
-            self._cluster.close()
-            self._cluster = None
 
 
 def pytest_addoption(parser):
@@ -84,8 +47,24 @@ def pytest_sessionstart(session):
         session.config.getoption("--dask-cluster")
         and session.config.getoption("--executor") == "dask-experimental"
     ):
-        DistributedClusterResource.get_instance().start()
+        from dask import config
+        from dask.distributed import Client, LocalCluster
+
+        # Avoid "Sending large graph of size ..." warnings
+        # (We expect these for tests using literal/random arrays)
+        config.set({"distributed.admin.large-graph-warning-threshold": "20MB"})
+
+        cluster = LocalCluster()
+        client = Client(cluster)
+        session.stash[DISTRIBUTED_CLUSTER_KEY] = {"cluster": cluster, "client": client}
 
 
 def pytest_sessionfinish(session):
-    DistributedClusterResource.get_instance().stop()
+    if DISTRIBUTED_CLUSTER_KEY in session.stash:
+        cluster_info = session.stash[DISTRIBUTED_CLUSTER_KEY]
+        client = cluster_info.get("client")
+        cluster = cluster_info.get("cluster")
+        if client is not None:
+            client.shutdown()
+        if cluster is not None:
+            cluster.close()
