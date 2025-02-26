@@ -187,7 +187,6 @@ def _simple_shuffle_graph(
     name_out: str,
     name_in: str,
     keys: tuple[NamedExpr, ...],
-    column_names: list[str],
     count_in: int,
     count_out: int,
 ) -> MutableMapping[Any, Any]:
@@ -195,25 +194,6 @@ def _simple_shuffle_graph(
     split_name = f"split-{name_out}"
     inter_name = f"inter-{name_out}"
     graph: MutableMapping[Any, Any] = {}
-
-    _keys: list[Col] = [ne.value for ne in keys if isinstance(ne.value, Col)]
-    if len(_keys) == len(keys):
-        shuffle_on = [k.name for k in _keys]
-        try:
-            from rapidsmp.integrations.dask import rapidsmp_shuffle_graph
-
-            return rapidsmp_shuffle_graph(
-                name_in,
-                name_out,
-                column_names,
-                shuffle_on,
-                count_in,
-                count_out,
-                CudfPolarsIntegration,
-            )
-        except (ImportError, ValueError):
-            # Fall back to simple task shuffle
-            pass
 
     for part_out in range(count_out):
         _concat_list = []
@@ -263,14 +243,34 @@ def _(
 def _(
     ir: Shuffle, partition_info: MutableMapping[IR, PartitionInfo]
 ) -> MutableMapping[Any, Any]:
-    # Use a simple all-to-all shuffle graph.
+    # Extract "shuffle_method" configuration
+    shuffle_method = ir.options.get("shuffle_method", None)
 
-    # TODO: Optionally use rapidsmp.
+    # Try using rapidsmp
+    _keys: list[Col] = [ne.value for ne in ir.keys if isinstance(ne.value, Col)]
+    if shuffle_method in (None, "rapidsmp") and len(_keys) == len(ir.keys):
+        shuffle_on = [k.name for k in _keys]
+        try:
+            from rapidsmp.integrations.dask import rapidsmp_shuffle_graph
+
+            return rapidsmp_shuffle_graph(
+                get_key_name(ir.children[0]),
+                get_key_name(ir),
+                list(ir.schema.keys()),
+                shuffle_on,
+                partition_info[ir.children[0]].count,
+                partition_info[ir].count,
+                CudfPolarsIntegration,
+            )
+        except ImportError as err:
+            if shuffle_method == "rapidsmp":
+                raise ImportError("rapidsmp is not installed.") from err
+
+    # Simple task-based fall-back
     return _simple_shuffle_graph(
         get_key_name(ir),
         get_key_name(ir.children[0]),
         ir.keys,
-        list(ir.schema.keys()),
         partition_info[ir.children[0]].count,
         partition_info[ir].count,
     )

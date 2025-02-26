@@ -62,6 +62,13 @@ parser.add_argument(
     action="store_true",
     help="Debug run.",
 )
+parser.add_argument(
+    "--shuffle",
+    default="rapidsmp",
+    type=str,
+    choices=["rapidsmp", "tasks"],
+    help="Shuffle method to use for distributed execution.",
+)
 args = parser.parse_args()
 
 
@@ -289,15 +296,12 @@ def run(args):
 
             kwargs = {
                 "protocol": "ucx",
-                # "device_memory_limit": 0.5,
             }
         except ImportError:
             from dask_cuda import LocalCUDACluster
 
             kwargs = {
                 "protocol": "ucx",
-                # "rmm_pool_size": 0.8,
-                # "rmm_managed_memory": True,
             }
 
         from distributed import Client
@@ -336,7 +340,11 @@ def run(args):
         if executor == "pylibcudf":
             executor_options = {}
         else:
-            executor_options = {"parquet_blocksize": args.blocksize}
+            executor_options = {
+                "parquet_blocksize": args.blocksize,
+                "shuffle_method": args.shuffle,
+                "bcast_join_limit": 2 if executor == "dask-cuda" else 32,
+            }
         engine = pl.GPUEngine(
             raise_on_fail=True,
             executor="dask-experimental" if executor.startswith("dask") else executor,
