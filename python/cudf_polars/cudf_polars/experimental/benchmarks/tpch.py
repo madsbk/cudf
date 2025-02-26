@@ -52,7 +52,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--blocksize",
-    default=2 * 1024**3,
+    default=1000**3,
     type=int,
     help="Approx. partition size.",
 )
@@ -288,14 +288,14 @@ def run(args):
             from rapidsmp.integrations.dask import LocalRMPCluster as LocalCUDACluster
 
             kwargs = {
-                # "protocol": "ucx",
+                "protocol": "ucx",
                 # "device_memory_limit": 0.5,
             }
         except ImportError:
             from dask_cuda import LocalCUDACluster
 
             kwargs = {
-                # "protocol": "ucx",
+                "protocol": "ucx",
                 # "rmm_pool_size": 0.8,
                 # "rmm_managed_memory": True,
             }
