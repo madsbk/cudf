@@ -262,9 +262,12 @@ def _(
                 partition_info[ir].count,
                 CudfPolarsIntegration,
             )
-        except ImportError as err:
+        except (ImportError, ValueError) as err:
             if shuffle_method == "rapidsmp":
-                raise ImportError("rapidsmp is not installed.") from err
+                raise RuntimeError(
+                    "Rapidsmp is not installed correctly or the current "
+                    "cluster does not support rapidsmp shuffling."
+                ) from err
 
     # Simple task-based fall-back
     return _simple_shuffle_graph(
