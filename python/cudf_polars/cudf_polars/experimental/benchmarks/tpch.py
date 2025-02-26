@@ -191,11 +191,7 @@ def q9(args):
             ).alias("amount"),
         )
         .group_by("nation", "o_year")
-        .agg(
-            pl.sum("amount")
-            # .round(2)  # TODO: Support `round`
-            .alias("sum_profit")
-        )
+        .agg(pl.sum("amount").round(2).alias("sum_profit"))
         .sort(by=["nation", "o_year"], descending=[False, True])
     )
 
@@ -230,7 +226,7 @@ def q10(args):
         .agg(
             (pl.col("l_extendedprice") * (1 - pl.col("l_discount")))
             .sum()
-            # .round(2)  # TODO: Support `round`
+            .round(2)
             .alias("revenue")
         )
         .select(
@@ -293,6 +289,7 @@ def run(args):
 
             kwargs = {
                 # "protocol": "ucx",
+                # "device_memory_limit": 0.5,
             }
         except ImportError:
             from dask_cuda import LocalCUDACluster
