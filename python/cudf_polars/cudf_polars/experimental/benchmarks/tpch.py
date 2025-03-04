@@ -291,28 +291,31 @@ def run(args):
     executor = args.executor
 
     if executor == "dask-cuda":
-        try:
-            from rapidsmp.integrations.dask import LocalRMPCluster as LocalCUDACluster
+        from distributed import Client
 
-            kwargs = {
-                "protocol": "ucx",
-            }
+        kwargs = {
+            "n_workers": args.n_workers,
+            "dashboard_address": ":8585",
+            "protocol": "ucx",
+        }
+
+        try:
+            from rapidsmp.integrations.dask import (
+                LocalRMPCluster,
+                bootstrap_dask_cluster,
+            )
+
+            client = Client(LocalRMPCluster(**kwargs))
+            client.wait_for_workers(args.n_workers)
+            bootstrap_dask_cluster(
+                client,
+                pool_size=0.8,
+                spill_device=0.5,
+            )
         except ImportError:
             from dask_cuda import LocalCUDACluster
 
-            kwargs = {
-                "protocol": "ucx",
-            }
-
-        from distributed import Client
-
-        client = Client(
-            LocalCUDACluster(
-                n_workers=args.n_workers,
-                dashboard_address=":8585",
-                **kwargs,
-            )
-        )
+            client = Client(LocalCUDACluster(**kwargs))
     else:
         client = None
 
