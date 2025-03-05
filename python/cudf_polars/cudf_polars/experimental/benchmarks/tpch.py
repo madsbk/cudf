@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from datetime import date
 
@@ -13,6 +14,11 @@ import polars as pl
 
 from cudf_polars.dsl.translate import Translator
 from cudf_polars.experimental.parallel import evaluate_dask
+
+# Without this setting, the first IO task to run
+# on each worker takes ~15 sec extra
+os.environ["KVIKIO_COMPAT_MODE"] = "on"
+
 
 parser = argparse.ArgumentParser(
     prog="Cudf-Polars TPC-H Benchmarks",
