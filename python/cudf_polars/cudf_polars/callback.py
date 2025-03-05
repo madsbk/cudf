@@ -235,6 +235,8 @@ def validate_config_options(config: dict) -> None:
             "parquet_blocksize",
             "cardinality_factor",
             "groupby_n_ary",
+            "shuffle_method",
+            "bcast_join_limit",
         }
     else:
         unsupported = config.get("executor_options", {}).keys()
