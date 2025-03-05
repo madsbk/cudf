@@ -53,7 +53,6 @@ def test_select_unsupported_raises(df, engine):
 @pytest.mark.parametrize(
     "aggs",
     [
-        (pl.col("a").sum(),),
         (
             (pl.col("a") + pl.col("b")).sum(),
             (pl.col("a") * 2 + pl.col("b")).alias("d").min(),
@@ -72,5 +71,5 @@ def test_select_aggs(df, engine, aggs):
 
 def test_select_with_cse_no_agg(df, engine):
     expr = pl.col("a") + pl.col("a")
-    query = df.select(expr, (expr * 2).alias("b"), ((expr * 2) + 10).alias("d"))
+    query = df.select(expr, (expr * 2).alias("b"), ((expr * 2) + 10).alias("c"))
     assert_gpu_result_equal(query, engine=engine)

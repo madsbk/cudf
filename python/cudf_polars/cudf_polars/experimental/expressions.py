@@ -12,7 +12,7 @@ import pylibcudf as plc
 
 from cudf_polars.containers import Column
 from cudf_polars.dsl.expressions.aggregation import Agg
-from cudf_polars.dsl.expressions.base import ExecutionContext, Expr
+from cudf_polars.dsl.expressions.base import ExecutionContext, Expr, NamedExpr
 from cudf_polars.dsl.traversal import (
     CachingVisitor,
     reuse_if_unchanged,
@@ -72,7 +72,7 @@ class FusedExpr(Expr):
 
 
 def extract_partition_counts(
-    exprs: Sequence[Expr],
+    exprs: Sequence[Expr | NamedExpr],
     child_ir_count: int,
     *,
     update: MutableMapping[Expr, int] | None = None,
@@ -100,7 +100,8 @@ def extract_partition_counts(
     Mapping between Expr nodes and partition counts.
     """
     expr_partition_counts: MutableMapping[Expr, int] = update or {}
-    for expr in exprs:
+    for e in exprs:
+        expr = e.value if isinstance(e, NamedExpr) else e
         for node in list(traversal([expr]))[::-1]:
             if isinstance(node, FusedExpr):
                 # Process the fused sub-expression graph first
@@ -134,52 +135,61 @@ def extract_partition_counts(
     return expr_partition_counts
 
 
-def replace_sub_expr(e: Expr, rec: ExprTransformer):
-    """Replace a target expression node."""
+def _replace(e: Expr, rec: ExprTransformer) -> Expr:
     mapping = rec.state["mapping"]
     if e in mapping:
         return mapping[e]
     return reuse_if_unchanged(e, rec)
 
 
-def rename_agg(agg: Agg, new_name: str):
+def replace(e: Expr, mapping: Mapping[Expr, Expr]) -> Expr:
+    """Replace one or more expression nodes."""
+    mapper = CachingVisitor(_replace, state={"mapping": mapping})
+    return mapper(e)
+
+
+def rename_agg(agg: Agg, new_name: str, *, new_options: Any = None):
     """Modify the name of an aggregation expression."""
-    return CachingVisitor(
-        replace_sub_expr,
-        state={"mapping": {agg: Agg(agg.dtype, new_name, agg.options, *agg.children)}},
-    )(agg)
+    return replace(agg, {agg: Agg(agg.dtype, new_name, new_options, *agg.children)})
 
 
-def decompose_expr_graph(expr: Expr) -> FusedExpr:
+def _decompose(expr: Expr, rec: ExprTransformer):
+    # Used by `decompose_expr_graph`
+
+    # Transform child expressions first
+    new_children = tuple(map(rec, expr.children))
+
+    if new_children:
+        # Non-leaf node.
+        # Construct child lists for new expressions
+        # (both the fused expression and the sub-expression)
+        sub_expr_children, fused_children = [], []
+        for child in new_children:
+            # All children should be FusedExpr
+            assert isinstance(child, FusedExpr)
+            if child.is_pointwise:
+                # Pointwise children must be fused into the
+                # "new" FusedExpr node with root `expr`
+                fused_children.extend(list(child.children))
+                sub_expr_children.append(child.sub_expr)
+            else:
+                # Non-pointwise children must remain as
+                # distinct FusedExpr nodes
+                fused_children.append(child)
+                sub_expr_children.append(child)
+        # Reconstruct and return the new FusedExpr
+        sub_expr = expr.reconstruct(sub_expr_children)
+        return FusedExpr(sub_expr.dtype, sub_expr, *fused_children)
+    else:
+        # Leaf node.
+        # Convert to simple FusedExpr with no children
+        return FusedExpr(expr.dtype, expr)
+
+
+def decompose_expr_graph(expr):
     """Transform an Expr into a graph of FusedExpr nodes."""
-    root = expr
-    while True:
-        exprs = [
-            e
-            for e in list(traversal([root]))[::-1]
-            if not (isinstance(e, FusedExpr) or e.is_pointwise)
-        ]
-        if not exprs:
-            if isinstance(root, FusedExpr):
-                break  # We are done rewriting root
-            exprs = [root]
-        old = exprs[0]
-
-        # Check that we can handle old
-        if not old.is_pointwise and not (
-            isinstance(old, Agg) and old.name in _SUPPORTED_AGGS
-        ):
-            raise NotImplementedError(
-                f"Selection does not support {expr} for multiple partitions."
-            )
-
-        # Rewrite root to replace old with FusedExpr(old)
-        children = [child for child in traversal([old]) if isinstance(child, FusedExpr)]
-        new = FusedExpr(old.dtype, old, *children)
-        mapper = CachingVisitor(replace_sub_expr, state={"mapping": {old: new}})
-        root = mapper(root)
-
-    return root
+    mapper = CachingVisitor(_decompose)
+    return mapper(expr)
 
 
 def evaluate_chunk(
@@ -189,7 +199,7 @@ def evaluate_chunk(
     *references: Column,
 ) -> Column:
     """Evaluate a single aggregation."""
-    return expr.evaluate(df, mapping=dict(zip(children, references, strict=False)))
+    return expr.evaluate(df, mapping=dict(zip(children, references, strict=True)))
 
 
 def evaluate_chunk_multi(
@@ -200,7 +210,7 @@ def evaluate_chunk_multi(
 ) -> tuple[Column, ...]:
     """Evaluate multiple aggregations."""
     return tuple(
-        expr.evaluate(df, mapping=dict(zip(children, references, strict=False)))
+        expr.evaluate(df, mapping=dict(zip(children, references, strict=True)))
         for expr in exprs
     )
 
@@ -209,9 +219,10 @@ def combine_chunks_multi(
     column_chunks: Sequence[tuple[Column]],
     combine_aggs: Sequence[Agg],
     finalize: tuple[plc.DataType, str] | None,
+    name: str,
 ) -> Column:
     """Aggregate Column chunks."""
-    column_chunk_lists = zip(*column_chunks, strict=False)
+    column_chunk_lists = zip(*column_chunks, strict=True)
 
     combined = [
         agg.op(
@@ -220,28 +231,29 @@ def combine_chunks_multi(
                 name=column_chunk_list[0].name,
             )
         )
-        for agg, column_chunk_list in zip(
-            combine_aggs, column_chunk_lists, strict=False
-        )
+        for agg, column_chunk_list in zip(combine_aggs, column_chunk_lists, strict=True)
     ]
 
     if finalize:
         # Perform optional BinOp on combined columns
         dt, op_name = finalize
         op = getattr(plc.binaryop.BinaryOperator, op_name)
-        cols = [c.obj for c in combined]
-        return Column(plc.binaryop.binary_operation(*cols, op, dt))
+        col = Column(plc.binaryop.binary_operation(*(c.obj for c in combined), op, dt))
+    else:
+        assert len(combined) == 1
+        col = combined[0]
 
-    assert len(combined) == 1
-    return combined[0]
+    return col.rename(name)
 
 
 def make_agg_graph(
-    expr: FusedExpr,
+    named_expr: NamedExpr,
     child_name: str,
     expr_partition_counts: MutableMapping[Expr, int],
 ) -> MutableMapping[Any, Any]:
     """Build a FusedExpr aggregation graph."""
+    expr = named_expr.value
+    assert isinstance(expr, FusedExpr)
     agg = expr.sub_expr
     assert isinstance(agg, Agg), f"Expected Agg, got {agg}"
     assert agg.name in _SUPPORTED_AGGS, f"Agg {agg} not supported"
@@ -286,7 +298,7 @@ def make_agg_graph(
             expr.children,
             *[
                 (name, 0) if bcast else (name, i)
-                for name, bcast in zip(expr_child_names, expr_bcast, strict=False)
+                for name, bcast in zip(expr_child_names, expr_bcast, strict=True)
             ],
         )
 
@@ -296,30 +308,34 @@ def make_agg_graph(
         list(graph.keys()),
         combine_aggs,
         finalize,
+        named_expr.name,
     )
 
     return graph
 
 
 def make_pointwise_graph(
-    expr: FusedExpr,
+    named_expr: NamedExpr,
     child_name: str,
     expr_partition_counts: MutableMapping[Expr, int],
 ) -> MutableMapping[Any, Any]:
     """Build simple pointwise FusedExpr graph."""
+    expr = named_expr.value
+    assert isinstance(expr, FusedExpr)
     key_name = get_key_name(expr)
     expr_child_names = [get_key_name(c) for c in expr.children]
     expr_bcast = [expr_partition_counts[c] == 1 for c in expr.children]
     count = expr_partition_counts[expr]
+    sub_expr = named_expr.reconstruct(expr.sub_expr)
     return {
         (key_name, i): (
             evaluate_chunk,
             (child_name, i),
-            expr.sub_expr,
+            sub_expr,
             expr.children,
             *[
                 (name, 0) if bcast else (name, i)
-                for name, bcast in zip(expr_child_names, expr_bcast, strict=False)
+                for name, bcast in zip(expr_child_names, expr_bcast, strict=True)
             ],
         )
         for i in range(count)
@@ -327,16 +343,18 @@ def make_pointwise_graph(
 
 
 def make_fusedexpr_graph(
-    expr: FusedExpr,
+    named_expr: NamedExpr,
     child_name: str,
     expr_partition_counts: MutableMapping[Expr, int],
 ) -> MutableMapping[Any, Any]:
     """Build task graph for a FusedExpr node."""
+    expr = named_expr.value
+    assert isinstance(expr, FusedExpr)
     sub_expr = expr.sub_expr
     if isinstance(sub_expr, Agg) and sub_expr.name in _SUPPORTED_AGGS:
-        return make_agg_graph(expr, child_name, expr_partition_counts)
+        return make_agg_graph(named_expr, child_name, expr_partition_counts)
     elif expr.is_pointwise:
-        return make_pointwise_graph(expr, child_name, expr_partition_counts)
+        return make_pointwise_graph(named_expr, child_name, expr_partition_counts)
     else:
         # TODO: Implement "complex" aggs (e.g. mean, std, etc)
         raise NotImplementedError(
