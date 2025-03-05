@@ -17,7 +17,7 @@ from cudf_polars.experimental.parallel import evaluate_dask
 
 # Without this setting, the first IO task to run
 # on each worker takes ~15 sec extra
-os.environ["KVIKIO_COMPAT_MODE"] = "on"
+os.environ["KVIKIO_COMPAT_MODE"] = os.environ.get("KVIKIO_COMPAT_MODE", "on")
 
 
 parser = argparse.ArgumentParser(
