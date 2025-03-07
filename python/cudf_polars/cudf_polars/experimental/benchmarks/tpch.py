@@ -344,7 +344,7 @@ def run(args):
         raise NotImplementedError(f"Query {q_id} not implemented.")
 
     if executor == "polars":
-        result = q.collect()
+        result = q.collect(new_streaming=True)
     else:
         if executor == "pylibcudf":
             executor_options = {}
