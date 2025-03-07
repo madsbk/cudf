@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 from polars.exceptions import InvalidOperationError
 
 import pylibcudf as plc
-import rmm
 from pylibcudf.strings.convert.convert_floats import from_floats, is_float, to_floats
 from pylibcudf.strings.convert.convert_integers import (
     from_integers,
@@ -60,9 +59,7 @@ class Column:
 
     @classmethod
     def deserialize(
-        cls,
-        header: ColumnHeader,
-        frames: tuple[memoryview, plc.gpumemoryview | rmm.DeviceBuffer],
+        cls, header: ColumnHeader, frames: tuple[memoryview, plc.gpumemoryview]
     ) -> Self:
         """
         Create a Column from a serialized representation returned by `.serialize()`.
@@ -80,8 +77,6 @@ class Column:
             The deserialized Column.
         """
         packed_metadata, packed_gpu_data = frames
-        if isinstance(packed_gpu_data, rmm.DeviceBuffer):
-            packed_gpu_data = plc.gpumemoryview(packed_gpu_data)
         (plc_column,) = plc.contiguous_split.unpack_from_memoryviews(
             packed_metadata, packed_gpu_data
         ).columns()

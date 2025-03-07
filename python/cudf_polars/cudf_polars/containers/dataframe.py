@@ -13,7 +13,6 @@ import pyarrow as pa
 import polars as pl
 
 import pylibcudf as plc
-import rmm
 
 from cudf_polars.containers import Column
 from cudf_polars.utils import dtypes
@@ -152,9 +151,7 @@ class DataFrame:
 
     @classmethod
     def deserialize(
-        cls,
-        header: DataFrameHeader,
-        frames: tuple[memoryview, plc.gpumemoryview | rmm.DeviceBuffer],
+        cls, header: DataFrameHeader, frames: tuple[memoryview, plc.gpumemoryview]
     ) -> Self:
         """
         Create a DataFrame from a serialized representation returned by `.serialize()`.
@@ -164,7 +161,7 @@ class DataFrame:
         header
             The (unpickled) metadata required to reconstruct the object.
         frames
-            Two-tuple of frames (a memoryview and a gpumemoryview or DeviceBuffer).
+            Two-tuple of frames (a memoryview and a gpumemoryview).
 
         Returns
         -------
@@ -172,8 +169,6 @@ class DataFrame:
             The deserialized DataFrame.
         """
         packed_metadata, packed_gpu_data = frames
-        if isinstance(packed_gpu_data, rmm.DeviceBuffer):
-            packed_gpu_data = plc.gpumemoryview(packed_gpu_data)
         table = plc.contiguous_split.unpack_from_memoryviews(
             packed_metadata, packed_gpu_data
         )
