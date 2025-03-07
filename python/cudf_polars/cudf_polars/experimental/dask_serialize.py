@@ -17,13 +17,6 @@ from cudf_polars.containers import Column, DataFrame
 __all__ = ["register"]
 
 
-def frames_to_gpumemoryview(frames):
-    return [
-        plc.gpumemoryview(f) if hasattr(f, "__cuda_array_interface__") else f
-        for f in frames
-    ]
-
-
 def register() -> None:
     """Register dask serialization routines for DataFrames."""
 
