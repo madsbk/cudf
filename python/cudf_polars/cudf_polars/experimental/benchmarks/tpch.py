@@ -353,6 +353,7 @@ def run(args):
                 "parquet_blocksize": args.blocksize,
                 "shuffle_method": args.shuffle,
                 "bcast_join_limit": 2 if executor == "dask-cuda" else 32,
+                "cardinality_factor": {"c_custkey": 0.05},
             }
         engine = pl.GPUEngine(
             raise_on_fail=True,

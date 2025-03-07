@@ -14,7 +14,7 @@ import cudf_polars.experimental.io
 import cudf_polars.experimental.join
 import cudf_polars.experimental.select
 import cudf_polars.experimental.shuffle  # noqa: F401
-from cudf_polars.dsl.ir import IR, Cache, Filter, HStack, Projection, Union
+from cudf_polars.dsl.ir import IR, Cache, Filter, HStack, Projection, Sort, Union
 from cudf_polars.dsl.traversal import CachingVisitor, traversal
 from cudf_polars.experimental.base import PartitionInfo, _concat, get_key_name
 from cudf_polars.experimental.dispatch import generate_ir_tasks, lower_ir_node
@@ -298,3 +298,58 @@ generate_ir_tasks.register(Projection, _generate_ir_tasks_pwise)
 generate_ir_tasks.register(Cache, _generate_ir_tasks_pwise)
 generate_ir_tasks.register(Filter, _generate_ir_tasks_pwise)
 generate_ir_tasks.register(HStack, _generate_ir_tasks_pwise)
+
+
+@lower_ir_node.register(Sort)
+def _(
+    ir: Sort, rec: LowerIRTransformer
+) -> tuple[IR, MutableMapping[IR, PartitionInfo]]:
+    # Specialized IR-lowering logic for Sort.
+    # This logic is a temporary workaround for
+    # cases like: `df.sort().head(20)`, where
+    # we can handle multiple input partitions
+    # if the output is beings sliced with an
+    # operation like head/tail.
+    (child,) = ir.children
+    new_child, pi = rec(child)
+    count = pi[new_child].count
+    if count > 1 and ir.zlice is None:
+        raise NotImplementedError(
+            f"Class {type(ir)} does not support multiple partitions "
+            f"unless `zlice` is specified."
+        )
+    new_node = ir.reconstruct([new_child])
+    pi[new_node] = PartitionInfo(count=1)
+    return new_node, pi
+
+
+@generate_ir_tasks.register(Sort)
+def _(
+    ir: Sort, partition_info: MutableMapping[IR, PartitionInfo]
+) -> MutableMapping[Any, Any]:
+    # Specialized graph-generation logic for Sort.
+    # This logic is a temporary workaround for
+    # cases like: `df.sort().head(20)`, where
+    # we can handle multiple input partitions
+    # if the output is beings sliced with an
+    # operation like head/tail.
+    name = get_key_name(ir)
+    (child,) = ir.children
+    child_name = get_key_name(child)
+    count_in = partition_info[child].count
+    inter_name = f"inter-{name}" if count_in > 1 else name
+    graph = {
+        (inter_name, pid): (
+            ir.do_evaluate,
+            *ir._non_child_args,
+            (child_name, pid),
+        )
+        for pid in range(count_in)
+    }
+    if count_in > 1:
+        graph[(name, 0)] = (
+            ir.do_evaluate,
+            *ir._non_child_args,
+            (_concat, list(graph.keys())),
+        )
+    return graph
