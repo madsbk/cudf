@@ -31,14 +31,21 @@ class TPCHQueries:
 
     Notes
     -----
-    - Query 8: Needs modified (but equivalent) groupby agg
-    - Query 11: Multi-partition NOT supported (conditional join)
-    - Query 16: Multi-partition NOT supported (n_unique)
-    - Query 17: Needs modified (but equivalent) groupby agg
-    - Query 20:
+    Query 8:
+     - Needs modified (but equivalent) groupby agg
+       (e.g. `agg((pl.sum("_tmp") / pl.sum("volume"))`)
+    Query 11:
+      - Multi-partition NOT supported (conditional join)
+    Query 16:
+      - Multi-partition NOT supported (n_unique)
+    Query 17:
+      - Needs modified (but equivalent) groupby agg
+       (e.g. `agg((0.2 * pl.col("l_quantity").mean())`)
+    Query 20:
       - Needs modified (but equivalent) groupby agg
       - Multi-partition NOT supported (unique)
-    - Query 22: Multi-partition NOT supported (unique)
+    Query 22:
+      - Multi-partition NOT supported (unique)
     """
 
     @staticmethod
