@@ -27,7 +27,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "query",
     type=int,
-    choices=[1, 5, 6, 9, 10, 18],
+    choices=[1, 2, 3, 5, 6, 9, 10, 18],
     help="Query number.",
 )
 parser.add_argument(
@@ -111,6 +111,81 @@ def q1(args):
             pl.len().alias("count_order"),
         )
         .sort("l_returnflag", "l_linestatus")
+    )
+
+
+def q2(args):
+    """Query 2."""
+    nation = get_data(args.path, "nation", args.suffix)
+    part = get_data(args.path, "part", args.suffix)
+    partsupp = get_data(args.path, "partsupp", args.suffix)
+    region = get_data(args.path, "region", args.suffix)
+    supplier = get_data(args.path, "supplier", args.suffix)
+
+    var1 = 15
+    var2 = "BRASS"
+    var3 = "EUROPE"
+
+    q1 = (
+        part.join(partsupp, left_on="p_partkey", right_on="ps_partkey")
+        .join(supplier, left_on="ps_suppkey", right_on="s_suppkey")
+        .join(nation, left_on="s_nationkey", right_on="n_nationkey")
+        .join(region, left_on="n_regionkey", right_on="r_regionkey")
+        .filter(pl.col("p_size") == var1)
+        .filter(pl.col("p_type").str.ends_with(var2))
+        .filter(pl.col("r_name") == var3)
+    )
+
+    return (
+        q1.group_by("p_partkey")
+        .agg(pl.min("ps_supplycost"))
+        .join(q1, on=["p_partkey", "ps_supplycost"])
+        .select(
+            "s_acctbal",
+            "s_name",
+            "n_name",
+            "p_partkey",
+            "p_mfgr",
+            "s_address",
+            "s_phone",
+            "s_comment",
+        )
+        .sort(
+            by=["s_acctbal", "n_name", "s_name", "p_partkey"],
+            descending=[True, False, False, False],
+        )
+        .head(100)
+    )
+
+
+def q3(args):
+    """Query 3."""
+    customer = get_data(args.path, "customer", args.suffix)
+    lineitem = get_data(args.path, "lineitem", args.suffix)
+    orders = get_data(args.path, "orders", args.suffix)
+
+    var1 = "BUILDING"
+    var2 = date(1995, 3, 15)
+
+    return (
+        customer.filter(pl.col("c_mktsegment") == var1)
+        .join(orders, left_on="c_custkey", right_on="o_custkey")
+        .join(lineitem, left_on="o_orderkey", right_on="l_orderkey")
+        .filter(pl.col("o_orderdate") < var2)
+        .filter(pl.col("l_shipdate") > var2)
+        .with_columns(
+            (pl.col("l_extendedprice") * (1 - pl.col("l_discount"))).alias("revenue")
+        )
+        .group_by("o_orderkey", "o_orderdate", "o_shippriority")
+        .agg(pl.sum("revenue"))
+        .select(
+            pl.col("o_orderkey").alias("l_orderkey"),
+            "revenue",
+            "o_orderdate",
+            "o_shippriority",
+        )
+        .sort(by=["revenue", "o_orderdate"], descending=[True, False])
+        .head(10)
     )
 
 
@@ -330,6 +405,10 @@ def run(args):
     q_id = args.query
     if q_id == 1:
         q = q1(args)
+    elif q_id == 2:
+        q = q2(args)
+    elif q_id == 3:
+        q = q3(args)
     elif q_id == 5:
         q = q5(args)
     elif q_id == 6:
@@ -356,6 +435,7 @@ def run(args):
                 "cardinality_factor": {
                     "c_custkey": 0.05,
                     "c_orderkey": 0.5,
+                    "o_orderkey": 1.0,
                     "l_orderkey": 1.0,
                 },
             }

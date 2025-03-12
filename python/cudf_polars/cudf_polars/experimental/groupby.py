@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 
 # Supported multi-partition aggregations
-_GB_AGG_SUPPORTED = ("sum", "count", "mean")
+_GB_AGG_SUPPORTED = ("sum", "count", "mean", "max", "min")
 
 
 def combine(
@@ -111,6 +111,11 @@ def decompose(
                     Cast(dtype, Agg(dtype, "sum", None, Col(dtype, name))),
                 )
             ]
+            return selection, aggregation, reduction
+        elif expr.name in ("max", "min"):
+            selection = NamedExpr(name, _wrap_unary(Col(dtype, name)))
+            aggregation = [NamedExpr(name, expr)]
+            reduction = [NamedExpr(name, expr)]
             return selection, aggregation, reduction
         elif expr.name == "mean":
             (child,) = expr.children
