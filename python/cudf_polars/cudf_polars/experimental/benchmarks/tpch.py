@@ -27,7 +27,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "query",
     type=int,
-    choices=[1, 2, 3, 5, 6, 9, 10, 18],
+    choices=[1, 2, 3, 4, 5, 6, 9, 10, 18],
     help="Query number.",
 )
 parser.add_argument(
@@ -186,6 +186,29 @@ def q3(args):
         )
         .sort(by=["revenue", "o_orderdate"], descending=[True, False])
         .head(10)
+    )
+
+
+def q4(args):
+    """Query 4."""
+    lineitem = get_data(args.path, "lineitem", args.suffix)
+    orders = get_data(args.path, "orders", args.suffix)
+
+    var1 = date(1993, 7, 1)
+    var2 = date(1993, 10, 1)
+
+    return (
+        # SQL exists translates to semi join in Polars API
+        orders.join(
+            (lineitem.filter(pl.col("l_commitdate") < pl.col("l_receiptdate"))),
+            left_on="o_orderkey",
+            right_on="l_orderkey",
+            how="semi",
+        )
+        .filter(pl.col("o_orderdate").is_between(var1, var2, closed="left"))
+        .group_by("o_orderpriority")
+        .agg(pl.len().alias("order_count"))
+        .sort("o_orderpriority")
     )
 
 
@@ -409,6 +432,8 @@ def run(args):
         q = q2(args)
     elif q_id == 3:
         q = q3(args)
+    elif q_id == 4:
+        q = q4(args)
     elif q_id == 5:
         q = q5(args)
     elif q_id == 6:
