@@ -211,8 +211,11 @@ def _(
             raise NotImplementedError(
                 "maintain_order not supported for multiple output partitions."
             )
-
-        shuffle_options: dict[str, Any] = {}
+        shuffle_options: dict[str, Any] = {
+            "shuffle_method": ir.config_options.get(
+                "executor_options.shuffle_method", default=None
+            ),
+        }
         gb_inter = Shuffle(
             pwise_schema,
             ir.keys,
