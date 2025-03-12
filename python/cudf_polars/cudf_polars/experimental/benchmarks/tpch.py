@@ -26,7 +26,20 @@ def get_data(path, table_name, suffix=""):
 
 
 class TPCHQueries:
-    """TPCH query definitions."""
+    """
+    TPCH query definitions.
+
+    Notes
+    -----
+    - Query 8: Needs modified (but equivalent) groupby agg
+    - Query 11: Multi-partition NOT supported (conditional join)
+    - Query 16: Multi-partition NOT supported (n_unique)
+    - Query 17: Needs modified (but equivalent) groupby agg
+    - Query 20:
+      - Needs modified (but equivalent) groupby agg
+      - Multi-partition NOT supported (unique)
+    - Query 22: Multi-partition NOT supported (unique)
+    """
 
     @staticmethod
     def q1(args):
@@ -412,6 +425,43 @@ class TPCHQueries:
         )
 
     @staticmethod
+    def q11(args):
+        """Query 11."""
+        nation = get_data(args.path, "nation", args.suffix)
+        partsupp = get_data(args.path, "partsupp", args.suffix)
+        supplier = get_data(args.path, "supplier", args.suffix)
+
+        var1 = "GERMANY"
+        var2 = 0.0001
+
+        q1 = (
+            partsupp.join(supplier, left_on="ps_suppkey", right_on="s_suppkey")
+            .join(nation, left_on="s_nationkey", right_on="n_nationkey")
+            .filter(pl.col("n_name") == var1)
+        )
+        q2 = q1.select(
+            (pl.col("ps_supplycost") * pl.col("ps_availqty"))
+            .sum()
+            .round(2)
+            .alias("tmp")
+            * var2
+        )
+
+        return (
+            q1.group_by("ps_partkey")
+            .agg(
+                (pl.col("ps_supplycost") * pl.col("ps_availqty"))
+                .sum()
+                .round(2)
+                .alias("value")
+            )
+            .join(q2, how="cross")
+            .filter(pl.col("value") > pl.col("tmp"))
+            .select("ps_partkey", "value")
+            .sort("value", descending=True)
+        )
+
+    @staticmethod
     def q12(args):
         """Query 12."""
         lineitem = get_data(args.path, "lineitem", args.suffix)
@@ -548,6 +598,38 @@ class TPCHQueries:
         )
 
     @staticmethod
+    def q17(args):
+        """Query 17."""
+        lineitem = get_data(args.path, "lineitem", args.suffix)
+        part = get_data(args.path, "part", args.suffix)
+
+        var1 = "Brand#23"
+        var2 = "MED BOX"
+
+        q1 = (
+            part.filter(pl.col("p_brand") == var1)
+            .filter(pl.col("p_container") == var2)
+            .join(lineitem, how="left", left_on="p_partkey", right_on="l_partkey")
+        )
+
+        return (
+            q1.group_by("p_partkey")
+            # Start hack.
+            # .agg((0.2 * pl.col("l_quantity").mean()).alias("avg_quantity"))
+            .agg(pl.col("l_quantity").mean().alias("avg_quantity"))
+            # End hack.
+            .select(pl.col("p_partkey").alias("key"), pl.col("avg_quantity"))
+            .join(q1, left_on="key", right_on="p_partkey")
+            # Start hack.
+            # .filter(pl.col("l_quantity") < pl.col("avg_quantity"))
+            .filter(pl.col("l_quantity") < (0.2 * pl.col("avg_quantity")))
+            # End hack.
+            .select(
+                (pl.col("l_extendedprice").sum() / 7.0).round(2).alias("avg_yearly")
+            )
+        )
+
+    @staticmethod
     def q18(args):
         """Query 18."""
         path = args.path
@@ -582,6 +664,165 @@ class TPCHQueries:
             )
             .sort(by=["o_totalprice", "o_orderdat"], descending=[True, False])
             .head(100)
+        )
+
+    @staticmethod
+    def q19(args):
+        """Query 19."""
+        lineitem = get_data(args.path, "lineitem", args.suffix)
+        part = get_data(args.path, "part", args.suffix)
+
+        return (
+            part.join(lineitem, left_on="p_partkey", right_on="l_partkey")
+            .filter(pl.col("l_shipmode").is_in(["AIR", "AIR REG"]))
+            .filter(pl.col("l_shipinstruct") == "DELIVER IN PERSON")
+            .filter(
+                (
+                    (pl.col("p_brand") == "Brand#12")
+                    & pl.col("p_container").is_in(
+                        ["SM CASE", "SM BOX", "SM PACK", "SM PKG"]
+                    )
+                    & (pl.col("l_quantity").is_between(1, 11))
+                    & (pl.col("p_size").is_between(1, 5))
+                )
+                | (
+                    (pl.col("p_brand") == "Brand#23")
+                    & pl.col("p_container").is_in(
+                        ["MED BAG", "MED BOX", "MED PKG", "MED PACK"]
+                    )
+                    & (pl.col("l_quantity").is_between(10, 20))
+                    & (pl.col("p_size").is_between(1, 10))
+                )
+                | (
+                    (pl.col("p_brand") == "Brand#34")
+                    & pl.col("p_container").is_in(
+                        ["LG CASE", "LG BOX", "LG PACK", "LG PKG"]
+                    )
+                    & (pl.col("l_quantity").is_between(20, 30))
+                    & (pl.col("p_size").is_between(1, 15))
+                )
+            )
+            .select(
+                (pl.col("l_extendedprice") * (1 - pl.col("l_discount")))
+                .sum()
+                .round(2)
+                .alias("revenue")
+            )
+        )
+
+    @staticmethod
+    def q20(args):
+        """Query 20."""
+        lineitem = get_data(args.path, "lineitem", args.suffix)
+        nation = get_data(args.path, "nation", args.suffix)
+        part = get_data(args.path, "part", args.suffix)
+        partsupp = get_data(args.path, "partsupp", args.suffix)
+        supplier = get_data(args.path, "supplier", args.suffix)
+
+        var1 = date(1994, 1, 1)
+        var2 = date(1995, 1, 1)
+        var3 = "CANADA"
+        var4 = "forest"
+
+        q1 = (
+            lineitem.filter(pl.col("l_shipdate").is_between(var1, var2, closed="left"))
+            .group_by("l_partkey", "l_suppkey")
+            # Hack start.
+            # .agg((pl.col("l_quantity").sum() * 0.5).alias("sum_quantity"))
+            .agg(pl.col("l_quantity").sum().alias("sum_quantity"))
+            .select(
+                pl.col("l_partkey"),
+                pl.col("l_suppkey"),
+                pl.col("sum_quantity").sum() * 0.5,
+            )
+            # Hack end.
+        )
+        q2 = nation.filter(pl.col("n_name") == var3)
+        q3 = supplier.join(q2, left_on="s_nationkey", right_on="n_nationkey")
+
+        return (
+            part.filter(pl.col("p_name").str.starts_with(var4))
+            .select(pl.col("p_partkey").unique())
+            .join(partsupp, left_on="p_partkey", right_on="ps_partkey")
+            .join(
+                q1,
+                left_on=["ps_suppkey", "p_partkey"],
+                right_on=["l_suppkey", "l_partkey"],
+            )
+            .filter(pl.col("ps_availqty") > pl.col("sum_quantity"))
+            .select(pl.col("ps_suppkey").unique())
+            .join(q3, left_on="ps_suppkey", right_on="s_suppkey")
+            .select("s_name", "s_address")
+            .sort("s_name")
+        )
+
+    @staticmethod
+    def q21(args):
+        """Query 21."""
+        lineitem = get_data(args.path, "lineitem", args.suffix)
+        nation = get_data(args.path, "nation", args.suffix)
+        orders = get_data(args.path, "orders", args.suffix)
+        supplier = get_data(args.path, "supplier", args.suffix)
+
+        var1 = "SAUDI ARABIA"
+
+        q1 = (
+            lineitem.group_by("l_orderkey")
+            .agg(pl.col("l_suppkey").len().alias("n_supp_by_order"))
+            .filter(pl.col("n_supp_by_order") > 1)
+            .join(
+                lineitem.filter(pl.col("l_receiptdate") > pl.col("l_commitdate")),
+                on="l_orderkey",
+            )
+        )
+
+        return (
+            q1.group_by("l_orderkey")
+            .agg(pl.col("l_suppkey").len().alias("n_supp_by_order"))
+            .join(q1, on="l_orderkey")
+            .join(supplier, left_on="l_suppkey", right_on="s_suppkey")
+            .join(nation, left_on="s_nationkey", right_on="n_nationkey")
+            .join(orders, left_on="l_orderkey", right_on="o_orderkey")
+            .filter(pl.col("n_supp_by_order") == 1)
+            .filter(pl.col("n_name") == var1)
+            .filter(pl.col("o_orderstatus") == "F")
+            .group_by("s_name")
+            .agg(pl.len().alias("numwait"))
+            .sort(by=["numwait", "s_name"], descending=[True, False])
+            .head(100)
+        )
+
+    @staticmethod
+    def q22(args):
+        """Query 22."""
+        customer = get_data(args.path, "customer", args.suffix)
+        orders = get_data(args.path, "orders", args.suffix)
+
+        q1 = (
+            customer.with_columns(pl.col("c_phone").str.slice(0, 2).alias("cntrycode"))
+            .filter(pl.col("cntrycode").str.contains("13|31|23|29|30|18|17"))
+            .select("c_acctbal", "c_custkey", "cntrycode")
+        )
+
+        q2 = q1.filter(pl.col("c_acctbal") > 0.0).select(
+            pl.col("c_acctbal").mean().alias("avg_acctbal")
+        )
+
+        q3 = orders.select(pl.col("o_custkey").unique()).with_columns(
+            pl.col("o_custkey").alias("c_custkey")
+        )
+
+        return (
+            q1.join(q3, on="c_custkey", how="left")
+            .filter(pl.col("o_custkey").is_null())
+            .join(q2, how="cross")
+            .filter(pl.col("c_acctbal") > pl.col("avg_acctbal"))
+            .group_by("cntrycode")
+            .agg(
+                pl.col("c_acctbal").count().alias("numcust"),
+                pl.col("c_acctbal").sum().round(2).alias("totacctbal"),
+            )
+            .sort("cntrycode")
         )
 
 
