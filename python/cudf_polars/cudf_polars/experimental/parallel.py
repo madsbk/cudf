@@ -14,7 +14,16 @@ import cudf_polars.experimental.io
 import cudf_polars.experimental.join
 import cudf_polars.experimental.select
 import cudf_polars.experimental.shuffle  # noqa: F401
-from cudf_polars.dsl.ir import IR, Cache, Filter, HStack, Projection, Sort, Union
+from cudf_polars.dsl.ir import (
+    IR,
+    Cache,
+    Filter,
+    HStack,
+    MapFunction,
+    Projection,
+    Sort,
+    Union,
+)
 from cudf_polars.dsl.traversal import CachingVisitor, traversal
 from cudf_polars.experimental.base import PartitionInfo, _concat, get_key_name
 from cudf_polars.experimental.dispatch import generate_ir_tasks, lower_ir_node
@@ -353,3 +362,23 @@ def _(
             (_concat, list(graph.keys())),
         )
     return graph
+
+
+@lower_ir_node.register(MapFunction)
+def _(
+    ir: MapFunction, rec: LowerIRTransformer
+) -> tuple[IR, MutableMapping[IR, PartitionInfo]]:
+    # Specialized IR-lowering logic for MapFunction.
+    (child,) = ir.children
+    new_child, pi = rec(child)
+    count = pi[new_child].count
+    if count > 1 and ir.name != "rename":
+        raise NotImplementedError(
+            f"Class {type(ir)} does not support multiple partitions for name={ir.name}."
+        )
+    new_node = ir.reconstruct([new_child])
+    pi[new_node] = PartitionInfo(count=count)
+    return new_node, pi
+
+
+generate_ir_tasks.register(MapFunction, _generate_ir_tasks_pwise)
