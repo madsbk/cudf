@@ -433,10 +433,8 @@ def run(args):
                 "shuffle_method": args.shuffle,
                 "bcast_join_limit": 2 if executor == "dask-cuda" else 32,
                 "cardinality_factor": {
-                    "c_custkey": 0.05,
-                    "c_orderkey": 0.5,
-                    "o_orderkey": 1.0,
-                    "l_orderkey": 1.0,
+                    "c_custkey": 0.05,  # Q10
+                    "l_orderkey": 1.0,  # Q18
                 },
             }
         engine = pl.GPUEngine(
