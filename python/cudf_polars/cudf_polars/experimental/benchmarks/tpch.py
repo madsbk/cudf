@@ -27,7 +27,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "query",
     type=int,
-    choices=[1, 2, 3, 4, 5, 6, 7, 9, 10, 18],
+    choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 18],
     help="Query number.",
 )
 parser.add_argument(
@@ -320,6 +320,60 @@ def q7(args):
     )
 
 
+def q8(args):
+    """Query 8."""
+    customer = get_data(args.path, "customer", args.suffix)
+    lineitem = get_data(args.path, "lineitem", args.suffix)
+    nation = get_data(args.path, "nation", args.suffix)
+    orders = get_data(args.path, "orders", args.suffix)
+    part = get_data(args.path, "part", args.suffix)
+    region = get_data(args.path, "region", args.suffix)
+    supplier = get_data(args.path, "supplier", args.suffix)
+
+    var1 = "BRAZIL"
+    var2 = "AMERICA"
+    var3 = "ECONOMY ANODIZED STEEL"
+    var4 = date(1995, 1, 1)
+    var5 = date(1996, 12, 31)
+
+    n1 = nation.select("n_nationkey", "n_regionkey")
+    n2 = nation.select("n_nationkey", "n_name")
+
+    return (
+        part.join(lineitem, left_on="p_partkey", right_on="l_partkey")
+        .join(supplier, left_on="l_suppkey", right_on="s_suppkey")
+        .join(orders, left_on="l_orderkey", right_on="o_orderkey")
+        .join(customer, left_on="o_custkey", right_on="c_custkey")
+        .join(n1, left_on="c_nationkey", right_on="n_nationkey")
+        .join(region, left_on="n_regionkey", right_on="r_regionkey")
+        .filter(pl.col("r_name") == var2)
+        .join(n2, left_on="s_nationkey", right_on="n_nationkey")
+        .filter(pl.col("o_orderdate").is_between(var4, var5))
+        .filter(pl.col("p_type") == var3)
+        .select(
+            pl.col("o_orderdate").dt.year().alias("o_year"),
+            (pl.col("l_extendedprice") * (1 - pl.col("l_discount"))).alias("volume"),
+            pl.col("n_name").alias("nation"),
+        )
+        .with_columns(
+            pl.when(pl.col("nation") == var1)
+            .then(pl.col("volume"))
+            .otherwise(0)
+            .alias("_tmp")
+        )
+        .group_by("o_year")
+        # .agg((pl.sum("_tmp") / pl.sum("volume")).round(2).alias("mkt_share"))
+        # Start hack.
+        .agg(pl.sum("_tmp"), pl.sum("volume"))
+        .select(
+            pl.col("o_year"),
+            (pl.sum("_tmp") / pl.sum("volume")).round(2).alias("mkt_share"),
+        )
+        # End hack.
+        .sort("o_year")
+    )
+
+
 def q9(args):
     """Query 9."""
     path = args.path
@@ -489,6 +543,8 @@ def run(args):
         q = q6(args)
     elif q_id == 7:
         q = q7(args)
+    elif q_id == 8:
+        q = q8(args)
     elif q_id == 9:
         q = q9(args)
     elif q_id == 10:
