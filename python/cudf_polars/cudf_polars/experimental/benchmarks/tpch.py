@@ -882,9 +882,9 @@ parser.add_argument(
 )
 parser.add_argument(
     "--shuffle",
-    default="rapidsmp",
+    default=None,
     type=str,
-    choices=["rapidsmp", "tasks"],
+    choices=[None, "rapidsmp", "tasks"],
     help="Shuffle method to use for distributed execution.",
 )
 args = parser.parse_args()
