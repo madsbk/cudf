@@ -940,7 +940,7 @@ def run(args):
             executor_options = {
                 "parquet_blocksize": args.blocksize,
                 "shuffle_method": args.shuffle,
-                "bcast_join_limit": 2 if executor == "dask-cuda" else 32,
+                "broadcast_join_limit": 2 if executor == "dask-cuda" else 32,
                 "cardinality_factor": {
                     "c_custkey": 0.05,  # Q10
                     "l_orderkey": 1.0,  # Q18

@@ -128,8 +128,8 @@ class ConfigOptions:
                 "parquet_blocksize",
                 "cardinality_factor",
                 "groupby_n_ary",
+                "broadcast_join_limit",
                 "shuffle_method",
-                "bcast_join_limit",
             }
         else:
             unsupported = config.get("executor_options", {}).keys()

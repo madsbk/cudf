@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 import operator
 from typing import TYPE_CHECKING, Any
 
@@ -21,12 +20,61 @@ from cudf_polars.experimental.base import _concat, get_key_name
 from cudf_polars.experimental.dispatch import generate_ir_tasks, lower_ir_node
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable, MutableMapping, Sequence
+    from collections.abc import MutableMapping, Sequence
 
     from cudf_polars.dsl.expr import NamedExpr
     from cudf_polars.experimental.dispatch import LowerIRTransformer
     from cudf_polars.experimental.parallel import PartitionInfo
     from cudf_polars.typing import Schema
+    from cudf_polars.utils.config import ConfigOptions
+
+
+# Supported shuffle methods
+_SHUFFLE_METHODS = ("rapidsmp", "tasks")
+
+
+# Experimental rapidsmp shuffler integration
+class RMPIntegration:  # pragma: no cover
+    """cuDF-Polars protocol for rapidsmp shuffler."""
+
+    @staticmethod
+    def insert_partition(
+        df: DataFrame,
+        on: Sequence[str],
+        partition_count: int,
+        shuffler: Any,
+    ) -> None:
+        """Add cudf-polars DataFrame chunks to an RMP shuffler."""
+        from rapidsmp.shuffler import partition_and_pack
+
+        columns_to_hash = tuple(df.column_names.index(val) for val in on)
+        packed_inputs = partition_and_pack(
+            df.table,
+            columns_to_hash=columns_to_hash,
+            num_partitions=partition_count,
+            stream=DEFAULT_STREAM,
+            device_mr=rmm.mr.get_current_device_resource(),
+        )
+        shuffler.insert_chunks(packed_inputs)
+
+    @staticmethod
+    def extract_partition(
+        partition_id: int,
+        column_names: list[str],
+        shuffler: Any,
+    ) -> DataFrame:
+        """Extract a finished partition from the RMP shuffler."""
+        from rapidsmp.shuffler import unpack_and_concat
+
+        shuffler.wait_on(partition_id)
+        return DataFrame.from_table(
+            unpack_and_concat(
+                shuffler.extract(partition_id),
+                stream=DEFAULT_STREAM,
+                device_mr=rmm.mr.get_current_device_resource(),
+            ),
+            column_names,
+        )
 
 
 try:
@@ -86,42 +134,32 @@ class Shuffle(IR):
     Only hash-based partitioning is supported (for now).
     """
 
-    __slots__ = ("keys", "options")
-    _non_child = ("schema", "keys", "options")
+    __slots__ = ("config_options", "keys")
+    _non_child = ("schema", "keys", "config_options")
     keys: tuple[NamedExpr, ...]
     """Keys to shuffle on."""
-    options: dict[str, Any]
-    """Shuffling options."""
+    config_options: ConfigOptions
+    """Configuration options."""
 
     def __init__(
         self,
         schema: Schema,
         keys: tuple[NamedExpr, ...],
-        options: dict[str, Any],
+        config_options: ConfigOptions,
         df: IR,
     ):
         self.schema = schema
         self.keys = keys
-        self.options = options
-        self._non_child_args = (schema, keys, options)
+        self.config_options = config_options
+        self._non_child_args = (schema, keys, config_options)
         self.children = (df,)
-
-    def get_hashable(self) -> Hashable:
-        """Hashable representation of the node."""
-        return (
-            type(self),
-            tuple(self.schema.items()),
-            self.keys,
-            json.dumps(self.options),
-            self.children,
-        )
 
     @classmethod
     def do_evaluate(
         cls,
         schema: Schema,
         keys: tuple[NamedExpr, ...],
-        options: dict[str, Any],
+        config_options: ConfigOptions,
         df: DataFrame,
     ):  # pragma: no cover
         """Evaluate and return a dataframe."""
@@ -184,8 +222,8 @@ def _partition_dataframe(
 
 
 def _simple_shuffle_graph(
-    name_out: str,
     name_in: str,
+    name_out: str,
     keys: tuple[NamedExpr, ...],
     count_in: int,
     count_out: int,
@@ -244,11 +282,23 @@ def _(
     ir: Shuffle, partition_info: MutableMapping[IR, PartitionInfo]
 ) -> MutableMapping[Any, Any]:
     # Extract "shuffle_method" configuration
-    shuffle_method = ir.options.get("shuffle_method", None)
+    if (
+        shuffle_method := ir.config_options.get(
+            "executor_options.shuffle_method",
+            default=None,
+        )
+    ) not in (*_SHUFFLE_METHODS, None):  # pragma: no cover
+        raise ValueError(
+            f"{shuffle_method} is not a supported shuffle method. "
+            f"Expected one of: {_SHUFFLE_METHODS}."
+        )
 
-    # Try using rapidsmp
-    _keys: list[Col] = [ne.value for ne in ir.keys if isinstance(ne.value, Col)]
-    if shuffle_method in (None, "rapidsmp") and len(_keys) == len(ir.keys):
+    # Try using rapidsmp shuffler if we have "simple" shuffle
+    # keys, and the "shuffle_method" config is set to "rapidsmp"
+    _keys: list[Col]
+    if shuffle_method in (None, "rapidsmp") and len(
+        _keys := [ne.value for ne in ir.keys if isinstance(ne.value, Col)]
+    ) == len(ir.keys):  # pragma: no cover
         shuffle_on = [k.name for k in _keys]
         try:
             from rapidsmp.integrations.dask import rapidsmp_shuffle_graph
@@ -260,19 +310,21 @@ def _(
                 shuffle_on,
                 partition_info[ir.children[0]].count,
                 partition_info[ir].count,
-                CudfPolarsIntegration,
+                RMPIntegration,
             )
         except (ImportError, ValueError) as err:
             if shuffle_method == "rapidsmp":
-                raise RuntimeError(
+                # Only raise an error if the user specifically
+                # set the shuffle method to "rapidsmp"
+                raise ValueError(
                     "Rapidsmp is not installed correctly or the current "
-                    "cluster does not support rapidsmp shuffling."
+                    "Dask cluster does not support rapidsmp shuffling."
                 ) from err
 
     # Simple task-based fall-back
     return _simple_shuffle_graph(
-        get_key_name(ir),
         get_key_name(ir.children[0]),
+        get_key_name(ir),
         ir.keys,
         partition_info[ir.children[0]].count,
         partition_info[ir].count,
