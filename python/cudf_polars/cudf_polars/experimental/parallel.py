@@ -359,7 +359,7 @@ def _(
         graph[(name, 0)] = (
             ir.do_evaluate,
             *ir._non_child_args,
-            (_concat, list(graph.keys())),
+            (_concat, *graph.keys()),
         )
     return graph
 
