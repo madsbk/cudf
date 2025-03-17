@@ -18,6 +18,7 @@ from cudf_polars.experimental.parallel import evaluate_dask
 # Without this setting, the first IO task to run
 # on each worker takes ~15 sec extra
 os.environ["KVIKIO_COMPAT_MODE"] = os.environ.get("KVIKIO_COMPAT_MODE", "on")
+os.environ["KVIKIO_NTHREADS"] = os.environ.get("KVIKIO_NTHREADS", "8")
 
 
 def get_data(path, table_name, suffix=""):
@@ -903,6 +904,8 @@ def run(args):
             "protocol": "ucx",
         }
 
+        # Avoid UVM in distributed cluster
+        os.environ["POLARS_GPU_ENABLE_CUDA_MANAGED_MEMORY"] = "0"
         try:
             from rapidsmp.integrations.dask import (
                 LocalRMPCluster,
@@ -921,6 +924,8 @@ def run(args):
 
             client = Client(LocalCUDACluster(**kwargs))
     else:
+        # Use UVM with synchronous scheduler
+        os.environ["POLARS_GPU_ENABLE_CUDA_MANAGED_MEMORY"] = "1"
         client = None
 
     t0 = time.time()

@@ -77,54 +77,6 @@ class RMPIntegration:  # pragma: no cover
         )
 
 
-try:
-    from rapidsmp.shuffler import partition_and_pack, unpack_and_concat
-
-    if TYPE_CHECKING:
-        from rapidsmp.shuffler import Shuffler
-
-    class CudfPolarsIntegration:
-        """cuDF Polars protocol for Dask integration."""
-
-        @staticmethod
-        def insert_partition(
-            df: DataFrame,
-            on: Sequence[str],
-            partition_count: int,
-            shuffler: Shuffler,
-        ) -> None:
-            """Add cudf-polars DataFrame chunks to an RMP shuffler."""
-            columns_to_hash = tuple(df.column_names.index(val) for val in on)
-            packed_inputs = partition_and_pack(
-                df.table,
-                columns_to_hash=columns_to_hash,
-                num_partitions=partition_count,
-                stream=DEFAULT_STREAM,
-                device_mr=rmm.mr.get_current_device_resource(),
-            )
-            shuffler.insert_chunks(packed_inputs)
-
-        @staticmethod
-        def extract_partition(
-            partition_id: int,
-            column_names: list[str],
-            shuffler: Shuffler,
-        ) -> DataFrame:
-            """Extract a finished partition from the RMP shuffler."""
-            shuffler.wait_on(partition_id)
-            return DataFrame.from_table(
-                unpack_and_concat(
-                    shuffler.extract(partition_id),
-                    stream=DEFAULT_STREAM,
-                    device_mr=rmm.mr.get_current_device_resource(),
-                ),
-                column_names,
-            )
-except ImportError:
-    # Rapidsmp not supported
-    pass
-
-
 class Shuffle(IR):
     """
     Shuffle multi-partition data.
@@ -231,8 +183,8 @@ def _simple_shuffle_graph(
     """Make a simple all-to-all shuffle graph."""
     split_name = f"split-{name_out}"
     inter_name = f"inter-{name_out}"
-    graph: MutableMapping[Any, Any] = {}
 
+    graph: MutableMapping[Any, Any] = {}
     for part_out in range(count_out):
         _concat_list = []
         for part_in in range(count_in):
