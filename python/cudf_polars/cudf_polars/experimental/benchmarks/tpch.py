@@ -337,14 +337,7 @@ class TPCHQueries:
                 .alias("_tmp")
             )
             .group_by("o_year")
-            # .agg((pl.sum("_tmp") / pl.sum("volume")).round(2).alias("mkt_share"))
-            # Start hack.
-            .agg(pl.sum("_tmp"), pl.sum("volume"))
-            .select(
-                pl.col("o_year"),
-                (pl.sum("_tmp") / pl.sum("volume")).round(2).alias("mkt_share"),
-            )
-            # End hack.
+            .agg((pl.sum("_tmp") / pl.sum("volume")).round(2).alias("mkt_share"))
             .sort("o_year")
         )
 
@@ -622,16 +615,10 @@ class TPCHQueries:
 
         return (
             q1.group_by("p_partkey")
-            # Start hack.
-            # .agg((0.2 * pl.col("l_quantity").mean()).alias("avg_quantity"))
-            .agg(pl.col("l_quantity").mean().alias("avg_quantity"))
-            # End hack.
+            .agg((0.2 * pl.col("l_quantity").mean()).alias("avg_quantity"))
             .select(pl.col("p_partkey").alias("key"), pl.col("avg_quantity"))
             .join(q1, left_on="key", right_on="p_partkey")
-            # Start hack.
-            # .filter(pl.col("l_quantity") < pl.col("avg_quantity"))
-            .filter(pl.col("l_quantity") < (0.2 * pl.col("avg_quantity")))
-            # End hack.
+            .filter(pl.col("l_quantity") < pl.col("avg_quantity"))
             .select(
                 (pl.col("l_extendedprice").sum() / 7.0).round(2).alias("avg_yearly")
             )
@@ -735,15 +722,7 @@ class TPCHQueries:
         q1 = (
             lineitem.filter(pl.col("l_shipdate").is_between(var1, var2, closed="left"))
             .group_by("l_partkey", "l_suppkey")
-            # Hack start.
-            # .agg((pl.col("l_quantity").sum() * 0.5).alias("sum_quantity"))
-            .agg(pl.col("l_quantity").sum().alias("sum_quantity"))
-            .select(
-                pl.col("l_partkey"),
-                pl.col("l_suppkey"),
-                pl.col("sum_quantity").sum() * 0.5,
-            )
-            # Hack end.
+            .agg((pl.col("l_quantity").sum() * 0.5).alias("sum_quantity"))
         )
         q2 = nation.filter(pl.col("n_name") == var3)
         q3 = supplier.join(q2, left_on="s_nationkey", right_on="n_nationkey")
