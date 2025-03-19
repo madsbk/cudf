@@ -61,11 +61,14 @@ def test_select_unsupported_raises(df, engine):
         (pl.col("a") - (pl.col("b") + pl.col("c").max()).sum(),),
         (pl.col("b").len(),),
         (pl.col("a") - (pl.col("b") + pl.col("c").max()).mean(),),
-        (pl.col("b").n_unique(), pl.col("c").n_unique()),
+        (
+            pl.col("b").n_unique().cast(pl.Int32),
+            (pl.col("c").n_unique() + 1).cast(pl.Int32),
+        ),
     ],
 )
 def test_select_aggs(df, engine, aggs):
-    # Test supported aggs (e.g. "min", "max", "std")
+    # Test supported aggs (e.g. "min", "max", "mean", "n_unique")
     query = df.select(*aggs)
     assert_gpu_result_equal(query, engine=engine)
 
