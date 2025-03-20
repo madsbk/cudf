@@ -9,6 +9,7 @@ import argparse
 import os
 import time
 from datetime import date
+from typing import Any
 
 import polars as pl
 
@@ -21,7 +22,7 @@ os.environ["KVIKIO_COMPAT_MODE"] = os.environ.get("KVIKIO_COMPAT_MODE", "on")
 os.environ["KVIKIO_NTHREADS"] = os.environ.get("KVIKIO_NTHREADS", "8")
 
 
-def get_data(path, table_name, suffix=""):
+def get_data(path: str, table_name: str, suffix: str = "") -> pl.LazyFrame:
     """Get table from dataset."""
     return pl.scan_parquet(f"{path}/{table_name}{suffix}")
 
@@ -50,7 +51,7 @@ class TPCHQueries:
     """
 
     @staticmethod
-    def q1(args):
+    def q1(args: Any) -> pl.LazyFrame:
         """Query 1."""
         lineitem = get_data(args.path, "lineitem", args.suffix)
 
@@ -81,7 +82,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q2(args):
+    def q2(args: Any) -> pl.LazyFrame:
         """Query 2."""
         nation = get_data(args.path, "nation", args.suffix)
         part = get_data(args.path, "part", args.suffix)
@@ -125,7 +126,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q3(args):
+    def q3(args: Any) -> pl.LazyFrame:
         """Query 3."""
         customer = get_data(args.path, "customer", args.suffix)
         lineitem = get_data(args.path, "lineitem", args.suffix)
@@ -158,7 +159,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q4(args):
+    def q4(args: Any) -> pl.LazyFrame:
         """Query 4."""
         lineitem = get_data(args.path, "lineitem", args.suffix)
         orders = get_data(args.path, "orders", args.suffix)
@@ -181,7 +182,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q5(args):
+    def q5(args: Any) -> pl.LazyFrame:
         """Query 5."""
         path = args.path
         suffix = args.suffix
@@ -219,7 +220,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q6(args):
+    def q6(args: Any) -> pl.LazyFrame:
         """Query 6."""
         path = args.path
         suffix = args.suffix
@@ -242,7 +243,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q7(args):
+    def q7(args: Any) -> pl.LazyFrame:
         """Query 7."""
         customer = get_data(args.path, "customer", args.suffix)
         lineitem = get_data(args.path, "lineitem", args.suffix)
@@ -293,7 +294,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q8(args):
+    def q8(args: Any) -> pl.LazyFrame:
         """Query 8."""
         customer = get_data(args.path, "customer", args.suffix)
         lineitem = get_data(args.path, "lineitem", args.suffix)
@@ -342,7 +343,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q9(args):
+    def q9(args: Any) -> pl.LazyFrame:
         """Query 9."""
         path = args.path
         suffix = args.suffix
@@ -378,7 +379,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q10(args):
+    def q10(args: Any) -> pl.LazyFrame:
         """Query 10."""
         path = args.path
         suffix = args.suffix
@@ -426,7 +427,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q11(args):
+    def q11(args: Any) -> pl.LazyFrame:
         """Query 11."""
         nation = get_data(args.path, "nation", args.suffix)
         partsupp = get_data(args.path, "partsupp", args.suffix)
@@ -463,7 +464,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q12(args):
+    def q12(args: Any) -> pl.LazyFrame:
         """Query 12."""
         lineitem = get_data(args.path, "lineitem", args.suffix)
         orders = get_data(args.path, "orders", args.suffix)
@@ -495,7 +496,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q13(args):
+    def q13(args: Any) -> pl.LazyFrame:
         """Query 13."""
         customer = get_data(args.path, "customer", args.suffix)
         orders = get_data(args.path, "orders", args.suffix)
@@ -517,7 +518,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q14(args):
+    def q14(args: Any) -> pl.LazyFrame:
         """Query 14."""
         lineitem = get_data(args.path, "lineitem", args.suffix)
         part = get_data(args.path, "part", args.suffix)
@@ -543,7 +544,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q15(args):
+    def q15(args: Any) -> pl.LazyFrame:
         """Query 15."""
         lineitem = get_data(args.path, "lineitem", args.suffix)
         supplier = get_data(args.path, "supplier", args.suffix)
@@ -571,7 +572,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q16(args):
+    def q16(args: Any) -> pl.LazyFrame:
         """Query 16."""
         part = get_data(args.path, "part", args.suffix)
         partsupp = get_data(args.path, "partsupp", args.suffix)
@@ -599,7 +600,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q17(args):
+    def q17(args: Any) -> pl.LazyFrame:
         """Query 17."""
         lineitem = get_data(args.path, "lineitem", args.suffix)
         part = get_data(args.path, "part", args.suffix)
@@ -625,7 +626,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q18(args):
+    def q18(args: Any) -> pl.LazyFrame:
         """Query 18."""
         path = args.path
         suffix = args.suffix
@@ -662,7 +663,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q19(args):
+    def q19(args: Any) -> pl.LazyFrame:
         """Query 19."""
         lineitem = get_data(args.path, "lineitem", args.suffix)
         part = get_data(args.path, "part", args.suffix)
@@ -706,7 +707,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q20(args):
+    def q20(args: Any) -> pl.LazyFrame:
         """Query 20."""
         lineitem = get_data(args.path, "lineitem", args.suffix)
         nation = get_data(args.path, "nation", args.suffix)
@@ -744,7 +745,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q21(args):
+    def q21(args: Any) -> pl.LazyFrame:
         """Query 21."""
         lineitem = get_data(args.path, "lineitem", args.suffix)
         nation = get_data(args.path, "nation", args.suffix)
@@ -780,7 +781,7 @@ class TPCHQueries:
         )
 
     @staticmethod
-    def q22(args):
+    def q22(args: Any) -> pl.LazyFrame:
         """Query 22."""
         customer = get_data(args.path, "customer", args.suffix)
         orders = get_data(args.path, "orders", args.suffix)
@@ -867,14 +868,21 @@ parser.add_argument(
     choices=[None, "rapidsmp", "tasks"],
     help="Shuffle method to use for distributed execution.",
 )
+parser.add_argument(
+    "--broadcast-join-limit",
+    default=None,
+    type=int,
+    help="Set an explicit `broadcast_join_limit` option.",
+)
 args = parser.parse_args()
 
 
-def run(args):
+def run(args: Any) -> None:
     """Run the benchmark once."""
     executor = args.executor
 
     if executor == "dask-cuda":
+        from dask_cuda import LocalCUDACluster
         from distributed import Client
 
         kwargs = {
@@ -885,27 +893,28 @@ def run(args):
 
         # Avoid UVM in distributed cluster
         os.environ["POLARS_GPU_ENABLE_CUDA_MANAGED_MEMORY"] = "0"
-        try:
-            from rapidsmp.integrations.dask import (
-                LocalRMPCluster,
-                bootstrap_dask_cluster,
-            )
+        if args.shuffle != "tasks":
+            try:
+                from rapidsmp.integrations.dask import (
+                    LocalRMPCluster,
+                    bootstrap_dask_cluster,
+                )
 
-            client = Client(LocalRMPCluster(**kwargs))
-            client.wait_for_workers(args.n_workers)
-            bootstrap_dask_cluster(
-                client,
-                pool_size=0.8,
-                spill_device=0.5,
-            )
-        except ImportError:
-            from dask_cuda import LocalCUDACluster
-
+                client = Client(LocalRMPCluster(**kwargs))
+                client.wait_for_workers(args.n_workers)
+                bootstrap_dask_cluster(
+                    client,
+                    pool_size=0.8,
+                    spill_device=0.5,
+                )
+            except ImportError:
+                client = None
+        if client is None:
+            # Not using rapidsmp shuffle
             client = Client(LocalCUDACluster(**kwargs))
     else:
         # Use UVM with synchronous scheduler
         os.environ["POLARS_GPU_ENABLE_CUDA_MANAGED_MEMORY"] = "1"
-        client = None
 
     t0 = time.time()
 
@@ -924,7 +933,11 @@ def run(args):
             executor_options = {
                 "parquet_blocksize": args.blocksize,
                 "shuffle_method": args.shuffle,
-                "broadcast_join_limit": 2 if executor == "dask-cuda" else 32,
+                "broadcast_join_limit": (
+                    (2 if executor == "dask-cuda" else 32)
+                    if args.broadcast_join_limit is None
+                    else args.broadcast_join_limit
+                ),
                 "cardinality_factor": {
                     "c_custkey": 0.05,  # Q10
                     "l_orderkey": 1.0,  # Q18
