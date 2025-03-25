@@ -880,6 +880,7 @@ args = parser.parse_args()
 def run(args: Any) -> None:
     """Run the benchmark once."""
     executor = args.executor
+    client = None
 
     if executor == "dask-cuda":
         from dask_cuda import LocalCUDACluster
@@ -893,25 +894,20 @@ def run(args: Any) -> None:
 
         # Avoid UVM in distributed cluster
         os.environ["POLARS_GPU_ENABLE_CUDA_MANAGED_MEMORY"] = "0"
+        client = Client(LocalCUDACluster(**kwargs))
+        client.wait_for_workers(args.n_workers)
         if args.shuffle != "tasks":
             try:
-                from rapidsmp.integrations.dask import (
-                    LocalRMPCluster,
-                    bootstrap_dask_cluster,
-                )
+                from rapidsmp.integrations.dask import bootstrap_dask_cluster
 
-                client = Client(LocalRMPCluster(**kwargs))
-                client.wait_for_workers(args.n_workers)
                 bootstrap_dask_cluster(
                     client,
                     pool_size=0.8,
                     spill_device=0.5,
                 )
-            except ImportError:
-                client = None
-        if client is None:
-            # Not using rapidsmp shuffle
-            client = Client(LocalCUDACluster(**kwargs))
+            except ImportError as err:
+                if args.shuffle == "rapidsmp":
+                    raise err
     else:
         # Use UVM with synchronous scheduler
         os.environ["POLARS_GPU_ENABLE_CUDA_MANAGED_MEMORY"] = "1"
