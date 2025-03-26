@@ -897,6 +897,7 @@ def run(args: Any) -> None:
             "n_workers": args.n_workers,
             "dashboard_address": ":8585",
             "protocol": "ucx",
+            "rmm_pool_size": 0.9,
         }
 
         # Avoid UVM in distributed cluster
@@ -907,27 +908,25 @@ def run(args: Any) -> None:
             try:
                 from rapidsmp.integrations.dask import bootstrap_dask_cluster
 
-                bootstrap_dask_cluster(
-                    client,
-                    pool_size=0.9,
-                    spill_device=0.5,
-                )
+                bootstrap_dask_cluster(client, spill_device=0.5)
             except ImportError as err:
                 if args.shuffle == "rapidsmp":
                     raise err
+        broadcast_join_limit = args.broadcast_join_limit or 2
     else:
         # Use UVM with synchronous scheduler
         os.environ["POLARS_GPU_ENABLE_CUDA_MANAGED_MEMORY"] = "1"
+        broadcast_join_limit = args.broadcast_join_limit or 32
+
+    q_id = args.query
+    try:
+        q = getattr(TPCHQueries, f"q{q_id}")(args)
+    except AttributeError as err:
+        raise NotImplementedError(f"Query {q_id} not implemented.") from err
 
     trials = []
     for _ in range(args.trials):
         t0 = time.time()
-
-        q_id = args.query
-        try:
-            q = getattr(TPCHQueries, f"q{q_id}")(args)
-        except AttributeError as err:
-            raise NotImplementedError(f"Query {q_id} not implemented.") from err
 
         if executor == "polars":
             result = q.collect(new_streaming=True)
@@ -938,11 +937,7 @@ def run(args: Any) -> None:
                 executor_options = {
                     "parquet_blocksize": args.blocksize,
                     "shuffle_method": args.shuffle,
-                    "broadcast_join_limit": (
-                        (2 if executor == "dask-cuda" else 32)
-                        if args.broadcast_join_limit is None
-                        else args.broadcast_join_limit
-                    ),
+                    "broadcast_join_limit": broadcast_join_limit,
                     "cardinality_factor": {
                         "c_custkey": 0.05,  # Q10
                         "l_orderkey": 1.0,  # Q18
