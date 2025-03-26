@@ -11,6 +11,7 @@ import time
 from datetime import date
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 from cudf_polars.dsl.translate import Translator
@@ -856,6 +857,12 @@ parser.add_argument(
     help="Approx. partition size.",
 )
 parser.add_argument(
+    "--trials",
+    default=1,
+    type=int,
+    help="Number of times to run the query.",
+)
+parser.add_argument(
     "--debug",
     default=False,
     action="store_true",
@@ -902,7 +909,7 @@ def run(args: Any) -> None:
 
                 bootstrap_dask_cluster(
                     client,
-                    pool_size=0.8,
+                    pool_size=0.9,
                     spill_device=0.5,
                 )
             except ImportError as err:
@@ -912,50 +919,69 @@ def run(args: Any) -> None:
         # Use UVM with synchronous scheduler
         os.environ["POLARS_GPU_ENABLE_CUDA_MANAGED_MEMORY"] = "1"
 
-    t0 = time.time()
+    trials = []
+    for _ in range(args.trials):
+        t0 = time.time()
 
-    q_id = args.query
-    try:
-        q = getattr(TPCHQueries, f"q{q_id}")(args)
-    except AttributeError as err:
-        raise NotImplementedError(f"Query {q_id} not implemented.") from err
+        q_id = args.query
+        try:
+            q = getattr(TPCHQueries, f"q{q_id}")(args)
+        except AttributeError as err:
+            raise NotImplementedError(f"Query {q_id} not implemented.") from err
 
-    if executor == "polars":
-        result = q.collect(new_streaming=True)
-    else:
-        if executor == "pylibcudf":
-            executor_options = {}
+        if executor == "polars":
+            result = q.collect(new_streaming=True)
         else:
-            executor_options = {
-                "parquet_blocksize": args.blocksize,
-                "shuffle_method": args.shuffle,
-                "broadcast_join_limit": (
-                    (2 if executor == "dask-cuda" else 32)
-                    if args.broadcast_join_limit is None
-                    else args.broadcast_join_limit
-                ),
-                "cardinality_factor": {
-                    "c_custkey": 0.05,  # Q10
-                    "l_orderkey": 1.0,  # Q18
-                },
-            }
-        engine = pl.GPUEngine(
-            raise_on_fail=True,
-            executor="dask-experimental" if executor.startswith("dask") else executor,
-            executor_options=executor_options,
-        )
-        if args.debug:
-            ir = Translator(q._ldf.visit(), engine).translate_ir()
             if executor == "pylibcudf":
-                result = ir.evaluate(cache={}).to_polars()
-            elif executor.startswith("dask"):
-                result = evaluate_dask(ir).to_polars()
-        else:
-            result = q.collect(engine=engine)
+                executor_options = {}
+            else:
+                executor_options = {
+                    "parquet_blocksize": args.blocksize,
+                    "shuffle_method": args.shuffle,
+                    "broadcast_join_limit": (
+                        (2 if executor == "dask-cuda" else 32)
+                        if args.broadcast_join_limit is None
+                        else args.broadcast_join_limit
+                    ),
+                    "cardinality_factor": {
+                        "c_custkey": 0.05,  # Q10
+                        "l_orderkey": 1.0,  # Q18
+                    },
+                }
+            engine = pl.GPUEngine(
+                raise_on_fail=True,
+                executor="dask-experimental" if executor.startswith("dask") else executor,
+                executor_options=executor_options,
+            )
+            if args.debug:
+                ir = Translator(q._ldf.visit(), engine).translate_ir()
+                if executor == "pylibcudf":
+                    result = ir.evaluate(cache={}).to_polars()
+                elif executor.startswith("dask"):
+                    result = evaluate_dask(ir).to_polars()
+            else:
+                result = q.collect(engine=engine)
 
-    t1 = time.time()
-    print(result)
-    print(f"time is {t1 - t0}")
+        t1 = time.time()
+        print(result)
+        print(f"time is {t1 - t0}")
+        trials.append(t1 - t0)
+
+    print(f"Trial Summary")
+    print(f"=======================================")
+    print(f"query: {q_id}")
+    print(f"path: {args.path}")
+    print(f"executor: {executor}")
+    print(f"blocksize: {args.blocksize}")
+    print(f"shuffle_method: {args.shuffle}")
+    print(f"broadcast_join_limit: {args.broadcast_join_limit}")
+    print(f"n_workers: {args.n_workers}")
+    print(f"n_trials: {args.trials}")
+    print(f"---------------------------------------")
+    print(f"min time: {min(trials)}")
+    print(f"max time: {max(trials)}")
+    print(f"mean time: {np.mean(trials)}")
+    print(f"=======================================")
 
     if client is not None:
         client.close(timeout=60)
