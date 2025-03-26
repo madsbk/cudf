@@ -1197,18 +1197,6 @@ class Join(IR):
         if options[5] != "none":
             raise NotImplementedError("maintain_order not implemented yet")
 
-    def get_hashable(self) -> Hashable:
-        """Hashable representation of the node."""
-        return (
-            type(self),
-            tuple(self.schema.items()),
-            self.left_on,
-            self.right_on,
-            json.dumps(self.options),
-            self.config_options,
-            self.children,
-        )
-
     @staticmethod
     @cache
     def _joiners(

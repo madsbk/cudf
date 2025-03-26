@@ -130,11 +130,6 @@ def decompose(
                 )
             ]
             return selection, aggregation, reduction
-        elif expr.name in ("max", "min"):
-            selection = NamedExpr(name, _wrap_unary(Col(dtype, name)))
-            aggregation = [NamedExpr(name, expr)]
-            reduction = [NamedExpr(name, expr)]
-            return selection, aggregation, reduction
         elif expr.name == "mean":
             (child,) = expr.children
             token = str(uuid.uuid4().hex)  # prevent collisions with user's names
@@ -258,6 +253,7 @@ def _(
             raise NotImplementedError(
                 "maintain_order not supported for multiple output partitions."
             )
+
         gb_inter = Shuffle(
             pwise_schema,
             ir.keys,
