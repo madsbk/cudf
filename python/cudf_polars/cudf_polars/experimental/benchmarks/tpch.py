@@ -12,6 +12,7 @@ from datetime import date
 from typing import Any
 
 import numpy as np
+
 import polars as pl
 
 from cudf_polars.dsl.translate import Translator
@@ -897,7 +898,7 @@ def run(args: Any) -> None:
             "n_workers": args.n_workers,
             "dashboard_address": ":8585",
             "protocol": "ucx",
-            "rmm_pool_size": 0.9,
+            "rmm_pool_size": 0.85,
         }
 
         # Avoid UVM in distributed cluster
@@ -911,7 +912,7 @@ def run(args: Any) -> None:
                 bootstrap_dask_cluster(client, spill_device=0.5)
             except ImportError as err:
                 if args.shuffle == "rapidsmp":
-                    raise err
+                    raise ImportError from err
         broadcast_join_limit = args.broadcast_join_limit or 2
     else:
         # Use UVM with synchronous scheduler
@@ -945,13 +946,15 @@ def run(args: Any) -> None:
                 }
             engine = pl.GPUEngine(
                 raise_on_fail=True,
-                executor="dask-experimental" if executor.startswith("dask") else executor,
+                executor="dask-experimental"
+                if executor.startswith("dask")
+                else executor,
                 executor_options=executor_options,
             )
             if args.debug:
                 ir = Translator(q._ldf.visit(), engine).translate_ir()
                 if executor == "pylibcudf":
-                    result = ir.evaluate(cache={}).to_polars()
+                    result = ir.evaluate(cache={}, timer=None).to_polars()
                 elif executor.startswith("dask"):
                     result = evaluate_dask(ir).to_polars()
             else:
@@ -962,8 +965,8 @@ def run(args: Any) -> None:
         print(f"time is {t1 - t0}")
         trials.append(t1 - t0)
 
-    print(f"Trial Summary")
-    print(f"=======================================")
+    print("Trial Summary")
+    print("=======================================")
     print(f"query: {q_id}")
     print(f"path: {args.path}")
     print(f"executor: {executor}")
@@ -972,11 +975,11 @@ def run(args: Any) -> None:
     print(f"broadcast_join_limit: {args.broadcast_join_limit}")
     print(f"n_workers: {args.n_workers}")
     print(f"n_trials: {args.trials}")
-    print(f"---------------------------------------")
+    print("---------------------------------------")
     print(f"min time: {min(trials)}")
     print(f"max time: {max(trials)}")
     print(f"mean time: {np.mean(trials)}")
-    print(f"=======================================")
+    print("=======================================")
 
     if client is not None:
         client.close(timeout=60)
