@@ -14,6 +14,7 @@ import cudf_polars.experimental.io
 import cudf_polars.experimental.join
 import cudf_polars.experimental.select
 import cudf_polars.experimental.shuffle  # noqa: F401
+from cudf_polars.containers import DataFrame
 from cudf_polars.dsl.ir import (
     IR,
     Cache,
@@ -27,6 +28,7 @@ from cudf_polars.dsl.ir import (
 from cudf_polars.dsl.traversal import CachingVisitor, traversal
 from cudf_polars.experimental.base import PartitionInfo, _concat, get_key_name
 from cudf_polars.experimental.dispatch import generate_ir_tasks, lower_ir_node
+from cudf_polars.experimental.spilling import wrap_dataframe_in_spillable
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
@@ -191,8 +193,12 @@ def evaluate_dask(ir: IR) -> DataFrame:
     ir, partition_info = lower_ir_graph(ir)
 
     get = get_client()
-
     graph, key = task_graph(ir, partition_info)
+
+    # TODO: make configurable
+    print("evaluate_dask() - enable spilling")
+    graph = wrap_dataframe_in_spillable(graph, ignore_key=key)
+
     return get(graph, key)
 
 
