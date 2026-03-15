@@ -582,7 +582,7 @@ def ray_execution(
         # this, workers start with a minimal environment and fail to import the
         # actor module even when the packages are installed.
         runtime_env: dict[str, Any] = ray_init_kwargs.pop("runtime_env", {})  # type: ignore[assignment]
-        env_vars: dict[str, str] = runtime_env.setdefault("env_vars", {})  # type: ignore[assignment]
+        env_vars: dict[str, str] = runtime_env.setdefault("env_vars", {})
         env_vars.setdefault("LD_LIBRARY_PATH", os.environ.get("LD_LIBRARY_PATH", ""))
         ray.init(runtime_env=runtime_env, **ray_init_kwargs)
 
