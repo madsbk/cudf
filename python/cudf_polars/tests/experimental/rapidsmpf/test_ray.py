@@ -38,7 +38,7 @@ def _ray_env() -> Iterator[tuple[RayClient, pl.GPUEngine]]:
             engine,
         ):
             yield ray_client, engine
-    except RuntimeError as e:
+    except (RuntimeError, ray.exceptions.RayError) as e:
         pytest.skip(f"Ray GPU cluster unavailable: {e}")
 
 
