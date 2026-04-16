@@ -5,18 +5,15 @@
 from __future__ import annotations
 
 import multiprocessing
-import traceback
-from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, call, patch
 
 import distributed
 import pytest
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from cudf_polars.testing.subprocess import run_in_subprocess, terminate_process
 
 
-def _run_in_subprocess(target: Callable[[], None]) -> None:
+def _run_in_subprocess(target):
     """Execute ``target()`` in a forked child process.
 
     Because each call forks a new child, process-wide side-effects
@@ -24,44 +21,10 @@ def _run_in_subprocess(target: Callable[[], None]) -> None:
     leak between tests or back into the pytest process.
     """
     ctx = multiprocessing.get_context("fork")
-    parent_conn, child_conn = ctx.Pipe()
-
-    def _wrapper() -> None:
-        try:
-            target()
-            child_conn.send(None)
-        except BaseException as exc:
-            try:
-                child_conn.send(exc)
-            except Exception:
-                child_conn.send(
-                    RuntimeError(
-                        f"{type(exc).__name__}: {exc}\n"
-                        f"{''.join(traceback.format_tb(exc.__traceback__))}"
-                    )
-                )
-        finally:
-            child_conn.close()
-
-    proc = ctx.Process(target=_wrapper)
+    error_queue = ctx.Queue()
+    proc = ctx.Process(target=run_in_subprocess, args=(target, error_queue))
     proc.start()
-    try:
-        proc.join(timeout=30)
-
-        if proc.is_alive():
-            proc.kill()
-            proc.join()
-            raise RuntimeError("Subprocess timed out after 30 seconds")
-
-        if parent_conn.poll():
-            exc = parent_conn.recv()
-            if exc is not None:
-                raise exc
-
-        if proc.exitcode != 0:
-            raise RuntimeError(f"Subprocess exited with code {proc.exitcode}")
-    finally:
-        proc.close()
+    terminate_process(proc, error_queue=error_queue)
 
 
 def _reset_bind_state() -> None:
