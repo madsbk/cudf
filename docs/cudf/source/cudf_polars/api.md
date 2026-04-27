@@ -9,15 +9,15 @@ multi-GPU engines.
 
 ```{eval-rst}
 .. autoclass:: cudf_polars.experimental.rapidsmpf.frontend.ray.RayEngine
-   :members: from_options, gather_cluster_info, shutdown, nranks
+   :members: from_options, gather_cluster_info, gather_statistics, global_statistics, shutdown, nranks
    :show-inheritance:
 
 .. autoclass:: cudf_polars.experimental.rapidsmpf.frontend.dask.DaskEngine
-   :members: from_options, gather_cluster_info, shutdown, nranks
+   :members: from_options, gather_cluster_info, gather_statistics, global_statistics, shutdown, nranks
    :show-inheritance:
 
 .. autoclass:: cudf_polars.experimental.rapidsmpf.frontend.spmd.SPMDEngine
-   :members: from_options, gather_cluster_info, shutdown, nranks, rank, comm, context
+   :members: from_options, gather_cluster_info, gather_statistics, global_statistics, shutdown, nranks, rank, comm, context
    :show-inheritance:
 ```
 
@@ -25,7 +25,7 @@ The three engines share a common base class:
 
 ```{eval-rst}
 .. autoclass:: cudf_polars.experimental.rapidsmpf.frontend.core.StreamingEngine
-   :members: gather_cluster_info, shutdown, nranks
+   :members: gather_cluster_info, gather_statistics, global_statistics, shutdown, nranks
    :show-inheritance:
 
 .. autoclass:: cudf_polars.experimental.rapidsmpf.frontend.core.ClusterInfo
