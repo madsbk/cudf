@@ -7,7 +7,7 @@ When a query runs on a streaming engine
 ({class}`~cudf_polars.experimental.rapidsmpf.frontend.ray.RayEngine`,
 {class}`~cudf_polars.experimental.rapidsmpf.frontend.dask.DaskEngine`, or
 {class}`~cudf_polars.experimental.rapidsmpf.frontend.spmd.SPMDEngine`), the underlying RapidsMPF
-runtime can record detailed per-rank statistics — shuffle byte counts, allgather participation,
+runtime can record detailed per-rank statistics: shuffle byte counts, allgather participation,
 memory-pool high-water marks, and more. See the [RapidsMPF statistics reference][rapidsmpf-stats] for the full list of metrics.
 
 Statistics collection is off by default. Enable it by setting `statistics=True` on

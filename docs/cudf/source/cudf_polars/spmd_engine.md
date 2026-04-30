@@ -3,16 +3,21 @@
 
 {class}`~cudf_polars.experimental.rapidsmpf.frontend.spmd.SPMDEngine` runs the streaming executor
 in [SPMD][spmd-wiki] mode: the same Python script runs once per GPU, and each process owns its
-local data fragment. Collective operations (shuffles, all-gathers, joins) coordinate across
+local data fragment. Collective operations (shuffles, allgathers, joins) coordinate across
 processes to produce a globally consistent result.
+
+On startup, `SPMDEngine` pins the process to the CPU cores and NUMA node closest to its GPU.
+Under `rrun` this binding is delegated to the launcher; outside `rrun` (single-process mode)
+`SPMDEngine` performs it itself. See
+{class}`~cudf_polars.experimental.rapidsmpf.frontend.hardware_binding.HardwareBindingPolicy`
+to override this behaviour.
 
 ## Single-GPU setup
 
-The simplest way to use
-{class}`~cudf_polars.experimental.rapidsmpf.frontend.spmd.SPMDEngine` is on a single GPU, run as
-a plain Python script — no `rrun` launcher, no external cluster library like Ray or Dask. You
-still get the full streaming executor (partitioned inputs, spilling, scaling past device
-memory); you just don't need any multi-process coordination:
+To use {class}`~cudf_polars.experimental.rapidsmpf.frontend.spmd.SPMDEngine` on a single GPU,
+create the engine and run your Python script as normal. You still get the full streaming
+executor (partitioned inputs, spilling, scaling past device memory); you just don't need any
+multi-process coordination:
 
 ```python
 # python my_script.py
@@ -30,20 +35,20 @@ with SPMDEngine() as engine:
 ```
 
 With a single rank, the [Query symmetry requirement](#query-symmetry-requirement) and
-[Collecting distributed results](#collecting-distributed-results) steps below do not apply —
-`collect()` returns the full result directly. This makes it the most lightweight way to try
-`SPMDEngine` locally or in a single-GPU pipeline.
+[Collecting distributed results](#collecting-distributed-results) steps below do not apply,
+`collect()` returns the full result directly.
 
 ## Multi-GPU with `rrun`
 
-The engine selects its communicator automatically:
+To run on more than one GPU, the same Python script must be launched collectively, and all
+processes must be informed that they are participating in the cluster. This is the role of the
+`rrun` launcher: it starts one process per GPU,
+{class}`~cudf_polars.experimental.rapidsmpf.frontend.spmd.SPMDEngine` detects this and bootstraps
+a UCXX communicator across all ranks.
 
-* **With `rrun`** — the `rrun` launcher starts one process per GPU and
-  {class}`~cudf_polars.experimental.rapidsmpf.frontend.spmd.SPMDEngine` bootstraps a UCXX
-  communicator across all ranks.
-* **Without `rrun`** — {class}`~cudf_polars.experimental.rapidsmpf.frontend.spmd.SPMDEngine`
-  falls back to a single-rank communicator that requires no external communication library. This
-  mode is useful for local development, unit tests, and single-GPU pipelines.
+When the same script is launched without `rrun`, `SPMDEngine` falls back to a single-process,
+single-GPU communicator that requires no external communication library. This mode is useful
+for local development, unit tests, and single-GPU pipelines (see [Single-GPU setup](#single-gpu-setup) above).
 
 ```python
 # multi-GPU launch: rrun -n 4 python my_script.py

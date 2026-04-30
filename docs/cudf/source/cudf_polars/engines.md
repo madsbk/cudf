@@ -14,8 +14,8 @@ cluster backend coordinates those workers.
 ### In-memory
 
 `engine="gpu"` (or `engine=pl.GPUEngine()`) runs the query on a single GPU, materializing
-intermediates in device memory. This is the simplest path and matches the mental model of
-OSS Polars' CPU engine: one process, one device, no streaming.
+intermediates in device memory. This is the simplest path to get started, but cannot take
+advantage of multiple GPUs.
 
 Use this when the data fits comfortably in device memory. On GPUs with Unified Virtual Memory,
 cudf-polars can spill past device memory, but at a performance cost.
@@ -23,8 +23,8 @@ cudf-polars can spill past device memory, but at a performance cost.
 ### Streaming
 
 Streaming engines partition their inputs (Parquet files or in-memory `DataFrame`s) and stream
-those partitions through the query graph. This lets queries scale past device memory, and — by
-distributing partitions across a cluster of GPU workers — across multiple GPUs and multiple
+those partitions through the query graph. This lets queries scale past device memory, and, by
+distributing partitions across a cluster of GPU workers, across multiple GPUs and multiple
 nodes.
 
 {class}`~cudf_polars.experimental.rapidsmpf.frontend.ray.RayEngine` with no arguments uses every
@@ -43,7 +43,8 @@ GPU workers is provisioned and coordinated:
 | {class}`~cudf_polars.experimental.rapidsmpf.frontend.dask.DaskEngine` | Single-client driver; one Dask worker per GPU           | [Dask distributed][dask]        | Teams with an existing Dask deployment or a preferred Dask launcher.          |
 | {class}`~cudf_polars.experimental.rapidsmpf.frontend.spmd.SPMDEngine` | Same script runs once per GPU, joined by a communicator | RapidsMPF (+ UCXX under `rrun`) | HPC / SPMD launchers such as `rrun`. Single-rank mode needs no cluster at all.|
 
-All three produce equivalent query results. Pick by deployment fit, not by performance.
+All three approaches use the same execution model under the hood, so which to select depends
+on your preferred deployment method, not performance tradeoffs.
 
 ## Where to go next
 

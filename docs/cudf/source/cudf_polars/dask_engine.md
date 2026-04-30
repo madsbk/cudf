@@ -2,9 +2,11 @@
 # Dask
 
 {class}`~cudf_polars.experimental.rapidsmpf.frontend.dask.DaskEngine` runs the streaming executor
-on a [Dask distributed][dask-distributed] cluster — one Dask worker per GPU, coordinated by a
-single client process. Partitions are streamed through the query graph and collective operations
-(shuffles, all-gathers, joins) run across workers over a shared UCXX communicator.
+on a [Dask distributed][dask-distributed] cluster: one Dask worker per GPU, coordinated by a
+single client process. Partitions are streamed through the query plan and collective operations
+(shuffles, allgathers, joins) run across workers over a shared UCXX communicator. On startup,
+each worker is pinned to the CPU cores and NUMA node closest to its GPU (see
+[Pre-configured GPU clusters](#pre-configured-gpu-clusters) below).
 
 ```python
 import polars as pl
@@ -27,7 +29,7 @@ bootstraps a UCXX communicator across all workers. On exit, everything it create
 
 ## Configuring `DaskEngine`
 
-For custom configuration, build a
+For custom configuration, build
 {class}`~cudf_polars.experimental.rapidsmpf.frontend.options.StreamingOptions` and use
 `DaskEngine.from_options()`:
 
@@ -64,10 +66,11 @@ leaves it (and the cluster) alone on exit.
 
 ### Pre-configured GPU clusters
 
-Some Dask launchers — notably `dask_cuda.LocalCUDACluster` — already pin CPU affinity and set
+Some Dask launchers, notably `dask_cuda.LocalCUDACluster`, already pin CPU affinity and set
 `CUDA_VISIBLE_DEVICES` per worker. Disable the built-in hardware binding via
-{class}`~cudf_polars.experimental.rapidsmpf.frontend.hardware_binding.HardwareBindingPolicy` to
-avoid conflicts:
+{class}`~cudf_polars.experimental.rapidsmpf.frontend.hardware_binding.HardwareBindingPolicy`
+to avoid having both layers fight over each worker's affinity (the second to run wins, which
+makes the resulting placement non-deterministic):
 
 ```python
 from cudf_polars.experimental.rapidsmpf.frontend.dask import DaskEngine
@@ -92,7 +95,7 @@ before the process spawns:
 
 ```bash
 # On each node — launch one worker per GPU with a single thread each:
-dask worker SCHEDULER:8786 --nworkers N --nthreads 1 \
+dask worker SCHEDULER_ADDRESS:8786 --nworkers N --nthreads 1 \
     --preload-nanny cudf_polars.experimental.rapidsmpf.frontend.dask
 ```
 
@@ -102,7 +105,7 @@ Then connect from the client:
 from distributed import Client
 from cudf_polars.experimental.rapidsmpf.frontend.dask import DaskEngine
 
-with Client("SCHEDULER:8786") as dc:
+with Client("SCHEDULER_ADDRESS:8786") as dc:
     with DaskEngine(dask_client=dc) as engine:
         result = lf.collect(engine=engine)
 ```
@@ -139,7 +142,7 @@ coordinated or they will fight:
 
 ```bash
 # On each node — GPU assignment + CPU affinity only (no RMM, no UCX flags):
-dask-cuda-worker SCHEDULER:8786
+dask-cuda-worker SCHEDULER_ADDRESS:8786
 ```
 
 ```python
@@ -149,7 +152,7 @@ from cudf_polars.experimental.rapidsmpf.frontend.hardware_binding import (
     HardwareBindingPolicy,
 )
 
-with Client("SCHEDULER:8786") as dc:
+with Client("SCHEDULER_ADDRESS:8786") as dc:
     with DaskEngine(
         dask_client=dc,
         engine_options={

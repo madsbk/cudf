@@ -31,16 +31,16 @@ categories of fields:
 
 | Category    | Scope                                                                                  | Env var prefix             |
 | ----------- | -------------------------------------------------------------------------------------- | -------------------------- |
-| `rapidsmpf` | RapidsMPF runtime, e.g. threads, CUDA streams, spilling, pinned memory, log level      | `RAPIDSMPF_`              |
-| `executor`  | Query execution and partitioning, e.g. `max_rows_per_partition`, `fallback_mode`, ...  | `CUDF_POLARS__EXECUTOR__` |
-| `engine`    | `pl.GPUEngine` kwargs, e.g. Parquet, memory resource, CUDA streams, hardware binding   | `CUDF_POLARS__`           |
+| `rapidsmpf` | RapidsMPF runtime, e.g. threads, CUDA streams, spilling, pinned memory, log level      | `RAPIDSMPF_`               |
+| `executor`  | Query execution and partitioning, e.g. `max_rows_per_partition`, `fallback_mode`, ...  | `CUDF_POLARS__EXECUTOR__`  |
+| `engine`    | `pl.GPUEngine` kwargs, e.g. Parquet, memory resource, CUDA streams, hardware binding   | `CUDF_POLARS__`            |
 
-The `engine` category surfaces the same knobs as plain `pl.GPUEngine(...)` — for example,
+The `engine` category surfaces the same tuning knobs as plain `pl.GPUEngine(...)`. For example,
 `parquet_options` and `memory_resource_config`. Configure these settings through
 {class}`~cudf_polars.experimental.rapidsmpf.frontend.options.StreamingOptions` rather than
 passing them to `pl.GPUEngine(...)` directly.
 
-The `rapidsmpf` category adds knobs for the streaming runtime that have no equivalent on the plain
+The `rapidsmpf` category adds configuration for the streaming runtime that has no equivalent on the plain
 `pl.GPUEngine`. See the [RapidsMPF configuration reference][rapidsmpf-config] for the underlying
 meaning of each `RAPIDSMPF_*` field.
 
@@ -109,9 +109,9 @@ See the [RapidsMPF configuration reference][rapidsmpf-config] for the full list 
 ### Category: `executor`
 
 | Field                    | Description                                                                                                         | Default                      |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| `num_py_executors`       | Number of workers for the internal Python `ThreadPoolExecutor`.                                                     | `8`                          |
-| `fallback_mode`          | Fallback behavior (`"warn"`, `"raise"`, `"silent"`).                                                                | `"warn"`                     |
+|--------------------------|---------------------------------------------------------------------------------------------------------------------|------------------------------|
+| `num_py_executors`       | Hint for the size of the internal Python `ThreadPoolExecutor`. The actual thread count is decided by `asyncio` and is not guaranteed to match. | `8` |
+| `fallback_mode`          | When an unsupported operation forces a fallback to CPU execution: `"warn"`, `"raise"`, `"silent"`.                  | `"warn"`                     |
 | `max_rows_per_partition` | Maximum number of rows per partition.                                                                               | `1_000_000`                  |
 | `broadcast_join_limit`   | Maximum number of partitions for broadcast joins.                                                                   | auto                         |
 | `target_partition_size`  | Target I/O partition size in bytes. `0` means auto.                                                                 | auto                         |
