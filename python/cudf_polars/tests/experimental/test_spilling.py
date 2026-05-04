@@ -49,6 +49,10 @@ def create_test_table(nbytes: int, stream: Stream) -> plc.Table:
         (False, MemoryType.HOST),
     ],
 )
+@pytest.mark.skip_on_streaming_engine(
+    "engine.context is only exposed on SPMDEngine, not on multi-process backends",
+    engine=("dask", "ray"),
+)
 def test_make_spill_function(
     streaming_engine_factory,
     *,

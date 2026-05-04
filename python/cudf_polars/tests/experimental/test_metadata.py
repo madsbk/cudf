@@ -63,6 +63,10 @@ def right() -> pl.LazyFrame:
         ),
     ],
 )
+@pytest.mark.skip_on_streaming_engine(
+    "ChannelMetadata is not picklable across worker processes",
+    engine=("dask", "ray"),
+)
 def test_rapidsmpf_join_metadata(
     left: pl.LazyFrame,
     right: pl.LazyFrame,
