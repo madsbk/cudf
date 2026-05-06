@@ -54,14 +54,12 @@ def test_rename_concat(streaming_engine) -> None:
     assert_gpu_result_equal(q, engine=streaming_engine)
 
 
-@pytest.mark.skip_on_streaming_engine(
-    "Worker-emitted warnings aren't visible to pytest.warns",
-    engine=("dask", "ray"),
-)
-def test_fallback_on_concat_zlice(streaming_engine_factory) -> None:
-    # Pin ``fallback_mode="warn"`` so the spmd-small baseline (which sets
-    # ``SILENT``) doesn't suppress the warning this test asserts on.
-    streaming_engine = streaming_engine_factory(StreamingOptions(fallback_mode="warn"))
+def test_fallback_on_concat_zlice(spmd_engine_factory) -> None:
+    # Pinned to SPMD: ``pytest.raises(UserWarning)`` below can't observe
+    # warnings emitted in Dask worker / Ray actor processes. ``fallback_mode``
+    # is also pinned to ``"warn"`` so the spmd-small baseline (which sets
+    # ``SILENT``) doesn't suppress the warning.
+    streaming_engine = spmd_engine_factory(StreamingOptions(fallback_mode="warn"))
     q = pl.concat(
         [
             pl.LazyFrame({"a": [1, 2]}),

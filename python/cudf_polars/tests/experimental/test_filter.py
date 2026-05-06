@@ -13,8 +13,6 @@ from cudf_polars.testing.asserts import assert_gpu_result_equal
 
 @pytest.fixture
 def engine(streaming_engine_factory):
-    # ``fallback_mode="warn"`` overrides the small-blocksize baseline (which
-    # sets SILENT) so ``test_filter_non_pointwise`` can assert on the warning.
     return streaming_engine_factory(
         StreamingOptions(max_rows_per_partition=3, fallback_mode="warn"),
     )
@@ -36,11 +34,14 @@ def test_filter_pointwise(df, engine):
     assert_gpu_result_equal(query, engine=engine)
 
 
-@pytest.mark.skip_on_streaming_engine(
-    "Worker-emitted warnings aren't visible to pytest.warns",
-    engine=("dask", "ray"),
-)
-def test_filter_non_pointwise(df, engine):
+def test_filter_non_pointwise(df, spmd_engine_factory):
+    # ``pytest.warns`` can only observe warnings raised in the test process,
+    # so this case is pinned to SPMD instead of fanning out to Dask/Ray.
+    # ``fallback_mode="warn"`` overrides the small-blocksize baseline
+    # (which sets SILENT) so the warning is actually emitted.
+    engine = spmd_engine_factory(
+        StreamingOptions(max_rows_per_partition=3, fallback_mode="warn"),
+    )
     query = df.filter(pl.col("a") > pl.col("a").max())
     with pytest.warns(
         UserWarning, match="This filter is not supported for multiple partitions."

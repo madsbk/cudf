@@ -46,12 +46,10 @@ def test_rolling_datetime(request, engine):
         assert_gpu_result_equal(q, engine=engine)
 
 
-@pytest.mark.skip_on_streaming_engine(
-    "Worker-emitted warnings aren't visible to pytest.warns",
-    engine=("dask", "ray"),
-)
-def test_over_in_filter_unsupported(streaming_engine_factory) -> None:
-    engine = streaming_engine_factory(
+def test_over_in_filter_unsupported(spmd_engine_factory) -> None:
+    # Pinned to SPMD: ``pytest.warns`` below can't observe warnings emitted
+    # in Dask worker / Ray actor processes.
+    engine = spmd_engine_factory(
         StreamingOptions(max_rows_per_partition=1, fallback_mode="warn"),
     )
     q = pl.concat(

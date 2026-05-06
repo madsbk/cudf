@@ -144,6 +144,28 @@ def spmd_engine(streaming_engines: StreamingEngines) -> SPMDEngine:
     return engine
 
 
+@pytest.fixture
+def spmd_engine_factory(
+    streaming_engines: StreamingEngines,
+) -> Callable[..., SPMDEngine]:
+    """
+    Return a factory that yields the shared :class:`SPMDEngine`.
+
+    Use this in place of :func:`streaming_engine_factory` for tests that
+    must run on SPMD only.
+    """
+    from cudf_polars.experimental.rapidsmpf.frontend.spmd import SPMDEngine
+
+    param = EngineFixtureParam(full_name="spmd")
+
+    def factory(options: StreamingOptions | None = None) -> SPMDEngine:
+        engine = build_streaming_engine(param, streaming_engines, options)
+        assert isinstance(engine, SPMDEngine)
+        return engine
+
+    return factory
+
+
 @pytest.fixture(params=STREAMING_ENGINE_FIXTURE_PARAMS)
 def _streaming_engine_param(request: pytest.FixtureRequest) -> EngineFixtureParam:
     """Parametrization helper to run tests for each streaming engine variant."""

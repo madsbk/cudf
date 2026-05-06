@@ -21,7 +21,6 @@ from cudf_polars.experimental.rapidsmpf.frontend.options import StreamingOptions
 from cudf_polars.experimental.rapidsmpf.utils import (
     make_spill_function,
 )
-from cudf_polars.testing.engine_utils import create_streaming_options
 
 if TYPE_CHECKING:
     from rmm.pylibrmm.stream import Stream
@@ -51,7 +50,7 @@ def create_test_table(nbytes: int, stream: Stream) -> plc.Table:
     ],
 )
 def test_make_spill_function(
-    spmd_engine,
+    spmd_engine_factory,
     *,
     pinned_memory: bool,
     spilled_host_mem_type: MemoryType,
@@ -59,15 +58,8 @@ def test_make_spill_function(
     """Test that spilling prioritizes longest queues and newest messages."""
     # Pinned to SPMD: this test reaches into ``engine.context``, which is only
     # exposed on ``SPMDEngine``.
-    streaming_options = create_streaming_options(
-        "medium", StreamingOptions(pinned_memory=pinned_memory)
-    )
-    spmd_engine._reset(
-        rapidsmpf_options=streaming_options.to_rapidsmpf_options(),
-        executor_options=streaming_options.to_executor_options(),
-        engine_options=streaming_options.to_engine_options(),
-    )
-    context = spmd_engine.context
+    engine = spmd_engine_factory(StreamingOptions(pinned_memory=pinned_memory))
+    context = engine.context
 
     if spilled_host_mem_type == MemoryType.PINNED_HOST:
         assert context.br().pinned_mr is not None

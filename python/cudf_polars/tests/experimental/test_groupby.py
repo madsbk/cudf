@@ -131,12 +131,10 @@ def test_groupby_std_var_ddof(df, engine, agg, ddof):
 
 
 @pytest.mark.parametrize("fallback_mode", ["silent", "raise", "warn", "foo"])
-@pytest.mark.skip_on_streaming_engine(
-    "Worker-emitted warnings aren't visible to pytest.warns",
-    engine=("dask", "ray"),
-)
-def test_groupby_fallback(df, fallback_mode, streaming_engine_factory):
-    streaming_engine = streaming_engine_factory(
+def test_groupby_fallback(df, fallback_mode, spmd_engine_factory):
+    # Pinned to SPMD: ``pytest.warns`` below can't see warnings emitted in
+    # Dask worker / Ray actor processes.
+    streaming_engine = spmd_engine_factory(
         StreamingOptions(fallback_mode=fallback_mode),
     )
     match = "Failed to decompose groupby aggs"

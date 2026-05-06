@@ -12,13 +12,6 @@ from cudf_polars.experimental.rapidsmpf.frontend.options import StreamingOptions
 from cudf_polars.testing.asserts import assert_gpu_result_equal
 
 
-@pytest.fixture
-def engine(streaming_engine_factory):
-    return streaming_engine_factory(
-        StreamingOptions(fallback_mode="warn"),
-    )
-
-
 @pytest.fixture(scope="module")
 def df():
     return pl.LazyFrame(
@@ -68,12 +61,10 @@ def test_unique_fallback(df, streaming_engine_factory):
 
 @pytest.mark.parametrize("maintain_order", [True, False])
 @pytest.mark.parametrize("cardinality", [{}, {"y": 0.5}])
-@pytest.mark.skip_on_streaming_engine(
-    "Worker-emitted warnings aren't visible to pytest.warns",
-    engine=("dask", "ray"),
-)
-def test_unique_select(df, streaming_engine_factory, maintain_order, cardinality):
-    engine = streaming_engine_factory(
+def test_unique_select(df, spmd_engine_factory, maintain_order, cardinality):
+    # Pinned to SPMD: ``pytest.warns`` below can't observe warnings emitted
+    # in Dask worker / Ray actor processes.
+    engine = spmd_engine_factory(
         StreamingOptions(
             max_rows_per_partition=4,
             unique_fraction=cardinality,
@@ -108,12 +99,11 @@ def test_unique_head_tail(keep, zlice, streaming_engine_factory):
     )
 
 
-@pytest.mark.skip_on_streaming_engine(
-    "Worker-emitted warnings aren't visible to pytest.warns",
-    engine=("dask", "ray"),
-)
-def test_unique_complex_slice_fallback(df, engine):
+def test_unique_complex_slice_fallback(df, spmd_engine_factory):
     """Test that unique with complex slice (offset >= 1) falls back correctly."""
+    # Pinned to SPMD: ``pytest.warns`` below can't observe warnings emitted
+    # in Dask worker / Ray actor processes.
+    engine = spmd_engine_factory(StreamingOptions(fallback_mode="warn"))
     # unique().slice(offset=5, length=10) has zlice[0] >= 1, triggering fallback
     q = df.unique(subset=("y",), keep="any").slice(5, 10)
     with pytest.warns(UserWarning, match="Complex slice not supported"):
