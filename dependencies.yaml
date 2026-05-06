@@ -1266,7 +1266,7 @@ dependencies:
     common:
       - output_types: [conda, requirements, pyproject]
         packages:
-          - ray>=2.0
+          - ray>=2.55.1
   depends_on_rapids_logger:
     common:
       - output_types: [conda, requirements, pyproject]
