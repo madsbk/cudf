@@ -51,12 +51,6 @@ trap set_exitcode ERR
 set +e
 
 rapids-logger "Running cudf_polars experimental tests (non-ci-blocking)"
-# Restrict UCX to TCP and CUDA transports. The runner's container is started
-# with the Docker default ``/dev/shm`` (~64MB), which is not enough for UCX's
-# shared-memory mpool to grow: ``uct_mm_iface_t_new`` segfaults during
-# UCXX worker creation in ``RankActor.setup_root``. TCP loopback + CUDA-IPC
-# avoids ``/dev/shm`` entirely.
-export UCX_TLS=tcp,cuda_copy,cuda_ipc
 
 timeout 30m ./ci/run_cudf_polars_experimental_pytests.sh \
     --no-cov \
