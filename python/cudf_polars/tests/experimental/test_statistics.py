@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from cudf_polars.experimental.rapidsmpf.frontend.core import StreamingEngine
 
 # Runs the spmd variant even under rrun with nranks > 1. The ray/dask
-# variants are gated out of the fixture matrix when running under rrun.
+# variants skip themselves in that environment.
 pytestmark = [
     pytest.mark.spmd,
 ]

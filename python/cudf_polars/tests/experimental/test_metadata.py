@@ -23,6 +23,7 @@ from cudf_polars.experimental.rapidsmpf.utils import (
     NormalizedPartitioning,
     maybe_remap_partitioning,
 )
+from cudf_polars.testing.engine_utils import create_streaming_options
 from cudf_polars.utils.config import ConfigOptions
 
 
@@ -63,27 +64,30 @@ def right() -> pl.LazyFrame:
         ),
     ],
 )
-@pytest.mark.skip_on_streaming_engine(
-    "ChannelMetadata is not picklable across worker processes",
-    engine=("dask", "ray"),
-)
 def test_rapidsmpf_join_metadata(
     left: pl.LazyFrame,
     right: pl.LazyFrame,
-    streaming_engine_factory,
+    spmd_engine,
     options,
 ) -> None:
-    streaming_engine = streaming_engine_factory(options)
-    config_options = ConfigOptions.from_polars_engine(streaming_engine)
+    # The metadata being asserted on is determined by IR lowering
+    # (engine-agnostic), so SPMD coverage is sufficient.
+    streaming_options = create_streaming_options("medium", options)
+    spmd_engine._reset(
+        rapidsmpf_options=streaming_options.to_rapidsmpf_options(),
+        executor_options=streaming_options.to_executor_options(),
+        engine_options=streaming_options.to_engine_options(),
+    )
+    config_options = ConfigOptions.from_polars_engine(spmd_engine)
     broadcast_join_limit = config_options.executor.broadcast_join_limit
     q = left.join(
         right,
         on="y",
         how="left",
     ).filter(pl.col("x") > pl.col("zz"))
-    ir = Translator(q._ldf.visit(), streaming_engine).translate_ir()
-    left_count = left.collect(engine=streaming_engine).height
-    right_count = right.collect(engine=streaming_engine).height
+    ir = Translator(q._ldf.visit(), spmd_engine).translate_ir()
+    left_count = left.collect(engine=spmd_engine).height
+    right_count = right.collect(engine=spmd_engine).height
 
     metadata_collector = evaluate_logical_plan(
         ir, config_options, collect_metadata=True

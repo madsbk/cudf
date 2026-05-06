@@ -22,8 +22,7 @@ STREAMING_ENGINE_FIXTURE_PARAMS: list[str] = []
 if importlib.util.find_spec("rapidsmpf") is not None:
     STREAMING_ENGINE_FIXTURE_PARAMS.extend(["spmd", "spmd-small"])
     # ``DaskEngine`` and ``RayEngine`` both reject construction inside an
-    # ``rrun`` cluster (they're client-side engines that connect to an
-    # external cluster), so the fixture matrix mirrors that gate.
+    # ``rrun`` cluster.
     from rapidsmpf.bootstrap import is_running_with_rrun as _is_running_with_rrun
 
     if not _is_running_with_rrun():  # pragma: no cover
@@ -31,7 +30,6 @@ if importlib.util.find_spec("rapidsmpf") is not None:
             STREAMING_ENGINE_FIXTURE_PARAMS.append("dask")
         if importlib.util.find_spec("ray") is not None:
             STREAMING_ENGINE_FIXTURE_PARAMS.append("ray")
-    del _is_running_with_rrun
 ALL_ENGINE_FIXTURE_PARAMS = ["in-memory", *STREAMING_ENGINE_FIXTURE_PARAMS]
 
 
@@ -100,9 +98,7 @@ def create_streaming_options(
 
     # ``allow_gpu_sharing=True`` is always set so the cached multi-rank
     # engines (Dask workers, Ray actors with ``num_ranks > 1``) don't trip
-    # the UUID-collision guard on every ``_reset(...)`` — ``_reset`` replaces
-    # ``engine_options`` wholesale, so the flag from construction time would
-    # otherwise be dropped after the first reset.
+    # the UUID-collision guard on every ``_reset(...)``.
     match blocksize_mode:
         case "medium":
             baseline = StreamingOptions(
