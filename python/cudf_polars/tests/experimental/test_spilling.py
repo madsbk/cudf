@@ -56,8 +56,6 @@ def test_make_spill_function(
     spilled_host_mem_type: MemoryType,
 ) -> None:
     """Test that spilling prioritizes longest queues and newest messages."""
-    # Pinned to SPMD: this test reaches into ``engine.context``, which is only
-    # exposed on ``SPMDEngine``.
     engine = spmd_engine_factory(StreamingOptions(pinned_memory=pinned_memory))
     context = engine.context
 

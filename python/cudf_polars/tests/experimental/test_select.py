@@ -55,8 +55,6 @@ def test_select(df, engine):
 
 @pytest.mark.parametrize("fallback_mode", ["silent", "raise", "warn", "foo"])
 def test_select_reduce_fallback(df, spmd_engine_factory, fallback_mode):
-    # Pinned to SPMD: ``pytest.warns`` below can't observe warnings emitted
-    # in Dask worker / Ray actor processes.
     engine = spmd_engine_factory(
         StreamingOptions(max_rows_per_partition=3, fallback_mode=fallback_mode),
     )
@@ -87,8 +85,6 @@ def test_select_reduce_fallback(df, spmd_engine_factory, fallback_mode):
 
 
 def test_select_fill_null_with_strategy(df, spmd_engine_factory):
-    # Pinned to SPMD: ``pytest.warns`` below can't observe warnings emitted
-    # in Dask worker / Ray actor processes.
     spmd_engine = spmd_engine_factory(
         StreamingOptions(max_rows_per_partition=3, fallback_mode="warn"),
     )
@@ -191,8 +187,6 @@ def test_select_mean_with_decimals(engine):
 
 
 def test_select_with_len(spmd_engine_factory):
-    # Pinned to SPMD: ``pytest.warns`` below can't observe warnings emitted
-    # in Dask worker / Ray actor processes.
     spmd_engine = spmd_engine_factory(
         StreamingOptions(max_rows_per_partition=3, fallback_mode="warn"),
     )

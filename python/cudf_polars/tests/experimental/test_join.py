@@ -91,8 +91,6 @@ def test_join_then_shuffle(left, right, streaming_engine_factory):
 @pytest.mark.parametrize("reverse", [True, False])
 @pytest.mark.parametrize("max_rows_per_partition", [3, 9])
 def test_join_conditional(reverse, max_rows_per_partition, spmd_engine_factory):
-    # Pinned to SPMD: ``pytest.warns`` below can't observe warnings emitted in
-    # Dask worker / Ray actor processes.
     streaming_engine = spmd_engine_factory(
         StreamingOptions(
             max_rows_per_partition=max_rows_per_partition,
@@ -159,8 +157,6 @@ def test_join(left, right, how, reverse, streaming_engine_factory, options):
 
 @pytest.mark.parametrize("zlice", [(0, 2), (2, 2), (-2, None)])
 def test_join_and_slice(zlice, spmd_engine_factory):
-    # Pinned to SPMD: ``pytest.warns`` below can't observe warnings emitted in
-    # Dask worker / Ray actor processes.
     streaming_engine = spmd_engine_factory(
         StreamingOptions(
             max_rows_per_partition=3,
@@ -227,8 +223,6 @@ def test_bloom_filter_join(how, streaming_engine_factory):
 def test_join_maintain_order_fallback_streaming(
     left, right, maintain_order, spmd_engine_factory
 ):
-    # Pinned to SPMD: ``pytest.warns`` below can't observe warnings emitted in
-    # Dask worker / Ray actor processes.
     streaming_engine = spmd_engine_factory(
         StreamingOptions(
             max_rows_per_partition=3,

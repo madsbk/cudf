@@ -132,8 +132,6 @@ def test_groupby_std_var_ddof(df, engine, agg, ddof):
 
 @pytest.mark.parametrize("fallback_mode", ["silent", "raise", "warn", "foo"])
 def test_groupby_fallback(df, fallback_mode, spmd_engine_factory):
-    # Pinned to SPMD: ``pytest.warns`` below can't see warnings emitted in
-    # Dask worker / Ray actor processes.
     streaming_engine = spmd_engine_factory(
         StreamingOptions(fallback_mode=fallback_mode),
     )

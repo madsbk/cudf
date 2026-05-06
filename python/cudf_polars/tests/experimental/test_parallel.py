@@ -55,10 +55,8 @@ def test_rename_concat(streaming_engine) -> None:
 
 
 def test_fallback_on_concat_zlice(spmd_engine_factory) -> None:
-    # Pinned to SPMD: ``pytest.raises(UserWarning)`` below can't observe
-    # warnings emitted in Dask worker / Ray actor processes. ``fallback_mode``
-    # is also pinned to ``"warn"`` so the spmd-small baseline (which sets
-    # ``SILENT``) doesn't suppress the warning.
+    # Pin ``fallback_mode="warn"`` so the spmd-small baseline (which sets
+    # ``SILENT``) doesn't suppress the warning this test asserts on.
     streaming_engine = spmd_engine_factory(StreamingOptions(fallback_mode="warn"))
     q = pl.concat(
         [

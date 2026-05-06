@@ -47,8 +47,6 @@ def test_rolling_datetime(request, engine):
 
 
 def test_over_in_filter_unsupported(spmd_engine_factory) -> None:
-    # Pinned to SPMD: ``pytest.warns`` below can't observe warnings emitted
-    # in Dask worker / Ray actor processes.
     engine = spmd_engine_factory(
         StreamingOptions(max_rows_per_partition=1, fallback_mode="warn"),
     )
