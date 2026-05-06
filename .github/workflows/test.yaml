@@ -150,6 +150,7 @@ jobs:
     with:
       build_type: ${{ inputs.build_type }}
       branch: ${{ inputs.branch }}
+      container-options: "--cap-add CAP_SYS_PTRACE --shm-size=8g --ulimit=nofile=1000000:1000000"
       date: ${{ inputs.date }}
       sha: ${{ inputs.sha }}
       script: "ci/test_wheel_cudf_polars.sh"
@@ -172,6 +173,7 @@ jobs:
     with:
       build_type: ${{ inputs.build_type }}
       branch: ${{ inputs.branch }}
+      container-options: "--cap-add CAP_SYS_PTRACE --shm-size=8g --ulimit=nofile=1000000:1000000"
       date: ${{ inputs.date }}
       sha: ${{ inputs.sha }}
       script: "ci/test_cudf_polars_polars_tests.sh"
