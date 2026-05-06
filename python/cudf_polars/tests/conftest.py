@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 # Number of ranks for multi-rank streaming engines that share one GPU
 # (currently ``RayEngine``). Single-GPU dev hosts and CI runners require
 # ``allow_gpu_sharing=True`` to oversubscribe one device across actors.
-NUM_RANKS = 1
+NUM_RANKS = 2
 
 
 @pytest.fixture(params=[False, True], ids=["no_nulls", "nulls"], scope="session")
