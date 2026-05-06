@@ -51,7 +51,6 @@ trap set_exitcode ERR
 set +e
 
 rapids-logger "Running cudf_polars experimental tests (non-ci-blocking)"
-
 timeout 30m ./ci/run_cudf_polars_experimental_pytests.sh \
     --no-cov \
     --numprocesses=8 \
