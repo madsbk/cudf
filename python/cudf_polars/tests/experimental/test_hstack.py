@@ -16,24 +16,17 @@ from cudf_polars.dsl.expressions.base import ExecutionContext
 from cudf_polars.dsl.ir import Filter, HStack
 from cudf_polars.dsl.traversal import traversal
 from cudf_polars.experimental.parallel import lower_ir_graph
+from cudf_polars.experimental.rapidsmpf.frontend.options import StreamingOptions
 from cudf_polars.experimental.repartition import Repartition
 from cudf_polars.experimental.statistics import collect_statistics
-from cudf_polars.testing.asserts import (
-    DEFAULT_CLUSTER,
-    assert_gpu_result_equal,
-)
+from cudf_polars.testing.asserts import assert_gpu_result_equal
 from cudf_polars.utils.config import ConfigOptions
 
 
-@pytest.fixture(scope="module")
-def engine():
-    return pl.GPUEngine(
-        raise_on_fail=True,
-        executor="streaming",
-        executor_options={
-            "max_rows_per_partition": 3,
-            "cluster": DEFAULT_CLUSTER,
-        },
+@pytest.fixture
+def engine(streaming_engine_factory):
+    return streaming_engine_factory(
+        StreamingOptions(max_rows_per_partition=3, raise_on_fail=True),
     )
 
 

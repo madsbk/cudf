@@ -32,7 +32,9 @@ if TYPE_CHECKING:
     from werkzeug import Request
 
 
-NO_CHUNK_ENGINE = pl.GPUEngine(raise_on_fail=True, parquet_options={"chunked": False})
+NO_CHUNK_ENGINE = pl.GPUEngine(
+    executor="in-memory", raise_on_fail=True, parquet_options={"chunked": False}
+)
 
 
 @pytest.fixture(
@@ -138,7 +140,11 @@ def test_scan(
         row_index_offset=offset,
         n_rows=n_rows,
     )
-    engine = pl.GPUEngine(raise_on_fail=True, parquet_options={"chunked": is_chunked})
+    engine = pl.GPUEngine(
+        executor="in-memory",
+        raise_on_fail=True,
+        parquet_options={"chunked": is_chunked},
+    )
 
     if zlice is not None:
         q = q.slice(*zlice)
@@ -430,6 +436,7 @@ def test_scan_parquet_chunked(
     assert_gpu_result_equal(
         q,
         engine=pl.GPUEngine(
+            executor="in-memory",
             raise_on_fail=True,
             parquet_options={
                 "chunked": True,
@@ -576,7 +583,12 @@ def test_scan_parquet_remote(
     q = pl.scan_parquet(httpserver.url_for(server_path))
 
     assert_gpu_result_equal(
-        q, engine=pl.GPUEngine(raise_on_fail=True, parquet_options={"chunked": chunked})
+        q,
+        engine=pl.GPUEngine(
+            executor="in-memory",
+            raise_on_fail=True,
+            parquet_options={"chunked": chunked},
+        ),
     )
 
 
