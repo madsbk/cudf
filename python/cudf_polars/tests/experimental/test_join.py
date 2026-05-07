@@ -156,7 +156,7 @@ def test_join(left, right, how, reverse, streaming_engine_factory, options):
 
 
 @pytest.mark.parametrize("zlice", [(0, 2), (2, 2), (-2, None)])
-def test_join_and_slice(zlice, streaming_engine_factory):
+def test_join_and_slice(request, zlice, streaming_engine_factory):
     streaming_engine = streaming_engine_factory(
         StreamingOptions(
             max_rows_per_partition=3,
@@ -164,6 +164,16 @@ def test_join_and_slice(zlice, streaming_engine_factory):
             fallback_mode="warn",
         ),
     )
+    if streaming_engine.nranks > 1:
+        # The multi-rank fallback for slice doesn't preserve row order
+        # within equal-key groups, so the slice can pick different rows
+        # than the CPU baseline.
+        request.applymarker(
+            pytest.mark.xfail(
+                reason="https://github.com/rapidsai/cudf/issues/22405",
+                strict=False,
+            )
+        )
     left = pl.LazyFrame(
         {
             "a": [1, 2, 3, 1, None],
