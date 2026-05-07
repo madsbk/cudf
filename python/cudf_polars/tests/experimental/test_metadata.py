@@ -69,8 +69,16 @@ def test_rapidsmpf_join_metadata(
     spmd_engine_factory,
     options,
 ) -> None:
-    # The metadata being asserted on is determined by IR lowering
-    # (engine-agnostic), so SPMD coverage is sufficient.
+    # Pinned to SPMD: ``ChannelMetadata.__reduce_cython__`` can't pickle
+    # ``self._handle`` across worker/actor processes, so the
+    # ``metadata_collector`` round-trip fails on Dask and Ray.
+    #
+    # When https://github.com/rapidsai/cudf/pull/22394 lands, dedup of
+    # replicated outputs moves to the Dask/Ray frontends and the
+    # ``duplicated`` flag's semantics change to "every rank holds the
+    # data". Revisit the ``len(metadata_collector) == 1`` and
+    # ``metadata.duplicated is False`` assertions below, and reconsider
+    # whether this test can widen to ``streaming_engine_factory``.
     engine = spmd_engine_factory(options)
     config_options = ConfigOptions.from_polars_engine(engine)
     broadcast_join_limit = config_options.executor.broadcast_join_limit
