@@ -73,7 +73,7 @@ def is_streaming_engine(obj: Any) -> bool:
     return isinstance(obj, StreamingEngine)
 
 
-def warns_on_spmd(
+def warns_on_spmd(  # pragma: no cover; rapidsmpf-only path
     engine: Any,
     *args: Any,
     when: bool = True,
