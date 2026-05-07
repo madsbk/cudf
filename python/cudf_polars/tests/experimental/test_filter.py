@@ -3,15 +3,13 @@
 
 from __future__ import annotations
 
-import contextlib
-
 import pytest
 
 import polars as pl
 
 from cudf_polars.experimental.rapidsmpf.frontend.options import StreamingOptions
-from cudf_polars.experimental.rapidsmpf.frontend.spmd import SPMDEngine
 from cudf_polars.testing.asserts import assert_gpu_result_equal
+from cudf_polars.testing.engine_utils import warns_on_spmd
 
 
 @pytest.fixture
@@ -39,16 +37,9 @@ def test_filter_pointwise(df, engine):
 
 def test_filter_non_pointwise(df, engine):
     query = df.filter(pl.col("a") > pl.col("a").max())
-    ctx = (
-        pytest.warns(
-            UserWarning,
-            match="This filter is not supported for multiple partitions.",
-        )
-        if isinstance(engine, SPMDEngine)
-        # pytest.warns only captures warnings from the test process. On Dask and
-        # Ray, the fallback warning is emitted on workers and only appears in
-        # worker logs/stdout.
-        else contextlib.nullcontext()
-    )
-    with ctx:
+    with warns_on_spmd(
+        engine,
+        UserWarning,
+        match="This filter is not supported for multiple partitions.",
+    ):
         assert_gpu_result_equal(query, engine=engine)

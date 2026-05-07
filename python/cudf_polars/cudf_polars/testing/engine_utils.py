@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from contextlib import AbstractContextManager
 
     import polars as pl
 
@@ -70,6 +71,34 @@ def is_streaming_engine(obj: Any) -> bool:
     except ImportError:  # pragma: no cover; only triggered without rapidsmpf
         return False
     return isinstance(obj, StreamingEngine)
+
+
+def warns_on_spmd(
+    engine: Any,
+    *args: Any,
+    when: bool = True,
+    **kwargs: Any,
+) -> AbstractContextManager[Any]:
+    """
+    ``pytest.warns(*args, **kwargs)`` on SPMD; ``nullcontext`` otherwise.
+
+    ``pytest.warns`` only captures warnings emitted in the test process. On
+    multi-process backends (``DaskEngine``, ``RayEngine``) the fallback
+    warning fires on workers/actors and only appears in worker logs/stdout,
+    so the assertion is replaced with a passthrough on those backends.
+
+    The optional ``when`` kwarg lets callers compose an additional gate (e.g.
+    a parametrize value) without an outer ``if``.
+    """
+    import contextlib
+
+    import pytest
+
+    from cudf_polars.experimental.rapidsmpf.frontend.spmd import SPMDEngine
+
+    if when and isinstance(engine, SPMDEngine):
+        return pytest.warns(*args, **kwargs)
+    return contextlib.nullcontext()
 
 
 def create_streaming_options(

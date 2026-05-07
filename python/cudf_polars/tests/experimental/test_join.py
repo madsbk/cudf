@@ -19,6 +19,7 @@ from cudf_polars.experimental.rapidsmpf.join import _use_pwise_join
 from cudf_polars.experimental.shuffle import Shuffle
 from cudf_polars.experimental.statistics import collect_statistics
 from cudf_polars.testing.asserts import assert_gpu_result_equal
+from cudf_polars.testing.engine_utils import warns_on_spmd
 from cudf_polars.utils.config import ConfigOptions, StreamingExecutor
 
 
@@ -90,8 +91,8 @@ def test_join_then_shuffle(left, right, streaming_engine_factory):
 
 @pytest.mark.parametrize("reverse", [True, False])
 @pytest.mark.parametrize("max_rows_per_partition", [3, 9])
-def test_join_conditional(reverse, max_rows_per_partition, spmd_engine_factory):
-    streaming_engine = spmd_engine_factory(
+def test_join_conditional(reverse, max_rows_per_partition, streaming_engine_factory):
+    streaming_engine = streaming_engine_factory(
         StreamingOptions(
             max_rows_per_partition=max_rows_per_partition,
             fallback_mode="warn",
@@ -103,12 +104,12 @@ def test_join_conditional(reverse, max_rows_per_partition, spmd_engine_factory):
     if reverse:
         left, right = right, left
     q = left.join_where(right, pl.col("y") < pl.col("yy"))
-    if max_rows_per_partition == 3:
-        with pytest.warns(
-            UserWarning, match="ConditionalJoin not supported for multiple partitions."
-        ):
-            assert_gpu_result_equal(q, engine=streaming_engine, check_row_order=False)
-    else:
+    with warns_on_spmd(
+        streaming_engine,
+        UserWarning,
+        match="ConditionalJoin not supported for multiple partitions.",
+        when=max_rows_per_partition == 3,
+    ):
         assert_gpu_result_equal(q, engine=streaming_engine, check_row_order=False)
 
 
@@ -156,8 +157,8 @@ def test_join(left, right, how, reverse, streaming_engine_factory, options):
 
 
 @pytest.mark.parametrize("zlice", [(0, 2), (2, 2), (-2, None)])
-def test_join_and_slice(zlice, spmd_engine_factory):
-    streaming_engine = spmd_engine_factory(
+def test_join_and_slice(zlice, streaming_engine_factory):
+    streaming_engine = streaming_engine_factory(
         StreamingOptions(
             max_rows_per_partition=3,
             broadcast_join_limit=100,
@@ -181,23 +182,22 @@ def test_join_and_slice(zlice, spmd_engine_factory):
     q = left.join(right, on="a", how="inner").slice(*zlice)
     # Check that we get the correct row count
     # See: https://github.com/rapidsai/cudf/issues/19153
-    if zlice in {(2, 2), (-2, None)}:
-        with pytest.warns(
-            UserWarning, match="This slice not supported for multiple partitions."
-        ):
-            assert q.collect(engine=streaming_engine).height == q.collect().height
-    else:
+    with warns_on_spmd(
+        streaming_engine,
+        UserWarning,
+        match="This slice not supported for multiple partitions.",
+        when=zlice in {(2, 2), (-2, None)},
+    ):
         assert q.collect(engine=streaming_engine).height == q.collect().height
 
     # Need sort to match order after a join
     q = left.join(right, on="a", how="inner").sort(pl.col("a")).slice(*zlice)
-    if zlice == (2, 2):
-        with pytest.warns(
-            UserWarning,
-            match="This slice not supported for multiple partitions.",
-        ):
-            assert_gpu_result_equal(q, engine=streaming_engine)
-    else:
+    with warns_on_spmd(
+        streaming_engine,
+        UserWarning,
+        match="This slice not supported for multiple partitions.",
+        when=zlice == (2, 2),
+    ):
         assert_gpu_result_equal(q, engine=streaming_engine)
 
 
@@ -221,9 +221,9 @@ def test_bloom_filter_join(how, streaming_engine_factory):
     "maintain_order", ["left_right", "right_left", "left", "right"]
 )
 def test_join_maintain_order_fallback_streaming(
-    left, right, maintain_order, spmd_engine_factory
+    left, right, maintain_order, streaming_engine_factory
 ):
-    streaming_engine = spmd_engine_factory(
+    streaming_engine = streaming_engine_factory(
         StreamingOptions(
             max_rows_per_partition=3,
             broadcast_join_limit=1,
@@ -232,7 +232,8 @@ def test_join_maintain_order_fallback_streaming(
     )
     q = left.join(right, on="y", how="inner", maintain_order=maintain_order)
 
-    with pytest.warns(
+    with warns_on_spmd(
+        streaming_engine,
         UserWarning,
         match=r"Join\(maintain_order=.*\) not supported for multiple partitions\.",
     ):
