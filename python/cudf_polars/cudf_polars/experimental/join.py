@@ -164,17 +164,18 @@ def _(
     left, pi_left = rec(left)
     right, pi_right = rec(right)
 
-    # Fallback to single partition on the smaller table
+    # Fallback to single partition on the smaller table whenever either
+    # side has more than one partition.
     left_count = pi_left[left].count
     right_count = pi_right[right].count
     output_count = max(left_count, right_count)
     fallback_msg = "ConditionalJoin not supported for multiple partitions."
     if left_count < right_count:
-        if left_count > 1 or dynamic_planning:
+        if output_count > 1 or dynamic_planning:
             left = Repartition(left.schema, left)
             pi_left[left] = PartitionInfo(count=1)
             _fallback_inform(fallback_msg, config_options)
-    elif right_count > 1 or dynamic_planning:
+    elif output_count > 1 or dynamic_planning:
         right = Repartition(right.schema, right)
         pi_right[right] = PartitionInfo(count=1)
         _fallback_inform(fallback_msg, config_options)

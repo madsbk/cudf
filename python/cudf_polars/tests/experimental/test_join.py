@@ -108,7 +108,6 @@ def test_join_conditional(reverse, max_rows_per_partition, streaming_engine_fact
         streaming_engine,
         UserWarning,
         match="ConditionalJoin not supported for multiple partitions.",
-        when=max_rows_per_partition == 3,
     ):
         assert_gpu_result_equal(q, engine=streaming_engine, check_row_order=False)
 
