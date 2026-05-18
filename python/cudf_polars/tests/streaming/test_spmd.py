@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+from cuda.bindings.runtime import cudaError_t
 
 import polars as pl
 from polars import polars as plrs  # type: ignore[attr-defined]
@@ -27,7 +28,9 @@ from cudf_polars.engine.hardware_binding import HardwareBindingPolicy
 from cudf_polars.engine.options import StreamingOptions
 from cudf_polars.engine.spmd import (
     SPMDEngine,
+    _check_engine_gpu_is_first,
     allgather_polars_dataframe,
+    use_gpu,
 )
 from cudf_polars.streaming.actor_graph.collectives.common import reserve_op_id
 from cudf_polars.testing.asserts import assert_gpu_result_equal
@@ -890,3 +893,143 @@ def test_memory_error_hint(spmd_engine: SPMDEngine) -> None:
             pytest.raises(MemoryError, match="target_partition_size"),
         ):
             q.collect(engine=spmd_engine)
+
+
+def test_engine_rejects_gpu_selected_by_ordinal() -> None:
+    """A process that selected a GPU by ordinal is rejected when the engine is built."""
+    with (
+        patch(
+            "cudf_polars.engine.spmd.cuda_runtime.cudaGetDevice",
+            return_value=(cudaError_t.cudaSuccess, 1),
+        ),
+        pytest.raises(RuntimeError, match="ordinal 0, but"),
+    ):
+        SPMDEngine()
+
+
+def test_check_engine_gpu_is_first_accepts_ordinal_zero() -> None:
+    """Ordinal 0 passes, which is what putting the GPU first guarantees."""
+    with patch(
+        "cudf_polars.engine.spmd.cuda_runtime.cudaGetDevice",
+        return_value=(cudaError_t.cudaSuccess, 0),
+    ):
+        _check_engine_gpu_is_first()
+
+
+def test_use_gpu_sets_visible_devices(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`use_gpu` sets CUDA_VISIBLE_DEVICES and accepts a single visible GPU."""
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    with patch(
+        "cudf_polars.engine.spmd.cuda_runtime.cudaGetDeviceCount",
+        return_value=(cudaError_t.cudaSuccess, 1),
+    ):
+        use_gpu(1)
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_use_gpu_rejects_already_initialized_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setting the variable after CUDA is up does nothing, and is reported."""
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    with (
+        patch(
+            "cudf_polars.engine.spmd.cuda_runtime.cudaGetDeviceCount",
+            return_value=(cudaError_t.cudaSuccess, 2),
+        ),
+        pytest.raises(RuntimeError, match="already initialized"),
+    ):
+        use_gpu(1)
+
+
+def test_use_gpu_rejects_unknown_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An index naming no visible GPU is reported as such."""
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    with (
+        patch(
+            "cudf_polars.engine.spmd.cuda_runtime.cudaGetDeviceCount",
+            return_value=(cudaError_t.cudaErrorNoDevice, None),
+        ),
+        pytest.raises(RuntimeError, match="no GPU matches"),
+    ):
+        use_gpu(9)
+
+
+# ---------------------------------------------------------------------------
+# GPU-resident handoff to torch
+# ---------------------------------------------------------------------------
+
+
+def test_persisted_to_torch_roundtrip(spmd_engine: SPMDEngine) -> None:
+    """The handoff returns this rank's rows, on the GPU, with the right values."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    lf = pl.LazyFrame({"a": [1.0, 2.0, 3.0], "b": [4, 5, 6]})
+    result = spmd_engine.execute(lf.select(pl.col("a") * 2, pl.col("b")))
+    tensors = persisted_to_torch(result, engine=spmd_engine)
+
+    assert set(tensors) == {"a", "b"}
+    assert tensors["a"].device.type == "cuda"
+    assert sorted(tensors["a"].tolist()) == [2.0, 4.0, 6.0]
+    assert sorted(tensors["b"].tolist()) == [4, 5, 6]
+
+
+def test_persisted_to_torch_shares_gpu_memory(spmd_engine: SPMDEngine) -> None:
+    """The tensor is a view of the column, not a copy of it."""
+    torch = pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0, 3.0]}).select("a"))
+    tensor = persisted_to_torch(result, engine=spmd_engine)["a"]
+    owner = tensor._cudf_polars_owner
+    base = owner.__cuda_array_interface__["data"][0]
+    assert base == tensor.data_ptr()
+    torch.cuda.synchronize()
+
+
+def test_persisted_to_torch_column_subset(spmd_engine: SPMDEngine) -> None:
+    """`columns` selects a subset, and an unknown name raises."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    lf = pl.LazyFrame({"a": [1.0], "b": [2.0]})
+    result = spmd_engine.execute(lf.select("a", "b"))
+    assert set(persisted_to_torch(result, engine=spmd_engine, columns=["b"])) == {"b"}
+
+    result = spmd_engine.execute(lf.select("a", "b"))
+    with pytest.raises(KeyError, match="not in result"):
+        persisted_to_torch(result, engine=spmd_engine, columns=["nope"])
+
+
+def test_persisted_to_torch_rejects_nulls(spmd_engine: SPMDEngine) -> None:
+    """A nullable column cannot become a tensor, and says so."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    lf = pl.LazyFrame({"a": [1.0, None, 3.0]})
+    result = spmd_engine.execute(lf.select("a"))
+    with pytest.raises(ValueError, match="contains nulls"):
+        persisted_to_torch(result, engine=spmd_engine)
+
+
+def test_persisted_to_torch_rejects_strings(spmd_engine: SPMDEngine) -> None:
+    """A string column has no tensor equivalent, and says so."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    lf = pl.LazyFrame({"s": ["x", "y"]})
+    result = spmd_engine.execute(lf.select("s"))
+    with pytest.raises(TypeError, match="no zero-copy torch equivalent"):
+        persisted_to_torch(result, engine=spmd_engine)
+
+
+def test_persisted_result_take_local_and_duplicated(spmd_engine: SPMDEngine) -> None:
+    """`take_local` hands back the partition once, and reports its layout."""
+    result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0]}).select("a"))
+    assert isinstance(result.local_is_duplicated(spmd_engine.rank), bool)
+
+    df = result.take_local(spmd_engine.rank)
+    assert df.num_rows == 2
+    with pytest.raises(RuntimeError, match="consumed on read"):
+        result.take_local(spmd_engine.rank)

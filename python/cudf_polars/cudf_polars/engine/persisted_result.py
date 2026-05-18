@@ -474,6 +474,56 @@ class PersistedQueryResult:
         """Release the persisted partitions on scope exit."""
         self.release()
 
+    def take_local(self, rank: int) -> DataFrame:
+        """
+        Remove and return ``rank``'s GPU-resident partition.
+
+        The partition is returned as a GPU-resident
+        :class:`~cudf_polars.containers.DataFrame` without a host round-trip,
+        for handing query output to another GPU library in the same process.
+        Like :meth:`lazy`, this consumes the partition: it can be taken once,
+        and afterwards the result can no longer be collected.
+
+        Parameters
+        ----------
+        rank
+            Rank whose partition to take. This is the caller's own rank, since
+            a partition lives in the process that produced it.
+
+        Returns
+        -------
+        ``rank``'s partition.
+
+        Raises
+        ------
+        RuntimeError
+            If the partition has already been consumed, or the producing
+            engine has been reset or shut down.
+        """
+        return _PersistedLoader(PersistedHandle(self._uid, self._query_id, rank))()
+
+    def local_is_duplicated(self, rank: int) -> bool:
+        """
+        Whether ``rank``'s partition is an identical copy held on every rank.
+
+        A duplicated output is one that every rank holds in full, such as the
+        result of a global reduction, as opposed to a partition holding a
+        disjoint subset of the rows. Read-only, so it is safe to probe before
+        :meth:`take_local`.
+
+        Parameters
+        ----------
+        rank
+            Rank whose partition to probe.
+
+        Returns
+        -------
+        ``True`` if the partition is a complete copy held on every rank.
+        """
+        return _PersistedLoader(
+            PersistedHandle(self._uid, self._query_id, rank)
+        ).is_duplicated()
+
     def lazy(self) -> pl.LazyFrame:
         """
         Return a :class:`~polars.LazyFrame` backed by the persisted partitions.
