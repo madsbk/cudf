@@ -28,6 +28,7 @@ from pylibcudf.libcudf.interop cimport (
     to_arrow_schema_raw,
 )
 from pylibcudf.libcudf.table.table cimport table
+from pylibcudf.libcudf.types cimport size_type
 
 from .column cimport Column
 from .types cimport DataType
@@ -65,13 +66,25 @@ cdef class Table:
     ----------
     columns : list
         The columns in this table.
+    num_rows : int | None
+        Optional explicit row count. Only used to preserve the row count of a
+        table with zero columns, which otherwise reports zero rows (see
+        https://github.com/rapidsai/cudf/issues/21428). When columns are
+        present the row count is derived from them and this must match.
     """
     __hash__ = None
 
-    def __init__(self, list columns):
+    def __init__(self, list columns, num_rows=None):
         if not all(isinstance(c, Column) for c in columns):
             raise ValueError("All columns must be pylibcudf Column objects")
         self._columns = columns
+        if num_rows is not None and len(columns) != 0 and num_rows != columns[0].size():
+            raise ValueError(
+                "num_rows does not match the size of the provided columns"
+            )
+        # Only retain the override when there are no columns; otherwise the row
+        # count is always derived from the columns.
+        self._num_rows = num_rows if len(columns) == 0 else None
 
     def to_arrow(
         self,
@@ -225,11 +238,20 @@ cdef class Table:
         # TODO: Make c_columns a class attribute that is updated along with
         # self._columns whenever new columns are added or columns are removed.
         cdef vector[column_view] c_columns
+        cdef size_type c_num_rows = 0
+        cdef bint have_num_rows = False
 
         with gil:
             for col in self._columns:
                 c_columns.push_back((<Column> col).view())
+            if self._num_rows is not None:
+                c_num_rows = <size_type> self._num_rows
+                have_num_rows = True
 
+        # Preserve an explicit row count for a zero-column table; otherwise the
+        # row count is derived from the columns.
+        if have_num_rows and c_columns.size() == 0:
+            return table_view(c_columns, c_num_rows)
         return table_view(c_columns)
 
     @staticmethod
@@ -246,13 +268,17 @@ cdef class Table:
         """
         assert stream is not None, "stream cannot be None"
         assert mr is not None, "mr cannot be None"
+        # Capture the row count before release() (which zeroes it) so a
+        # zero-column table preserves its rows.
+        cdef size_type nrows = dereference(libcudf_tbl).num_rows()
         cdef vector[unique_ptr[column]] c_columns = dereference(libcudf_tbl).release()
 
         cdef vector[unique_ptr[column]].size_type i
-        return Table([
+        cols = [
             Column.from_libcudf(move(c_columns[i]), stream, mr)
             for i in range(c_columns.size())
-        ])
+        ]
+        return Table(cols, num_rows=(nrows if len(cols) == 0 else None))
 
     @staticmethod
     cdef Table from_table_view(const table_view& tv, Table owner):
@@ -265,10 +291,13 @@ cdef class Table:
         (even direct pylibcudf Cython users).
         """
         cdef int i
-        return Table([
-            Column.from_column_view(tv.column(i), owner.columns()[i])
-            for i in range(tv.num_columns())
-        ])
+        return Table(
+            [
+                Column.from_column_view(tv.column(i), owner.columns()[i])
+                for i in range(tv.num_columns())
+            ],
+            num_rows=(tv.num_rows() if tv.num_columns() == 0 else None),
+        )
 
     # Ideally this function would simply be handled via a fused type in
     # from_table_view, but this does not work due to
@@ -295,10 +324,13 @@ cdef class Table:
         assert not isinstance(owner, Table)
         cdef int i
         cdef Stream _stream = <Stream>stream
-        return Table([
-            Column.from_column_view_of_arbitrary(tv.column(i), owner, _stream)
-            for i in range(tv.num_columns())
-        ])
+        return Table(
+            [
+                Column.from_column_view_of_arbitrary(tv.column(i), owner, _stream)
+                for i in range(tv.num_columns())
+            ],
+            num_rows=(tv.num_rows() if tv.num_columns() == 0 else None),
+        )
 
     cpdef int num_columns(self):
         """The number of columns in this table."""
@@ -307,7 +339,7 @@ cdef class Table:
     cpdef int num_rows(self):
         """The number of rows in this table."""
         if self.num_columns() == 0:
-            return 0
+            return self._num_rows if self._num_rows is not None else 0
         return self._columns[0].size()
 
     cpdef list columns(self):
@@ -335,7 +367,10 @@ cdef class Table:
         """
         cdef Stream _stream = _get_stream(stream)
         mr = _get_memory_resource(mr)
-        return Table([col.copy(_stream, mr) for col in self._columns])
+        return Table(
+            [col.copy(_stream, mr) for col in self._columns],
+            num_rows=self._num_rows,
+        )
 
     def _to_schema(self, metadata=None):
         """Create an Arrow schema from this table."""

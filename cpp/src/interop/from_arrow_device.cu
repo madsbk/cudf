@@ -432,7 +432,13 @@ unique_table_view_t from_arrow_device(ArrowSchema const* schema,
       return out_view;
     });
 
-  return unique_table_view_t{new table_view{columns},
+  // A zero-column struct still has a length; preserve it as the table row count
+  // (a table_view built from no columns would otherwise report 0 rows).
+  auto* table_view_ptr =
+    columns.empty()
+      ? new table_view{std::vector<column_view>{}, static_cast<size_type>(input->array.length)}
+      : new table_view{columns};
+  return unique_table_view_t{table_view_ptr,
                              custom_view_deleter<cudf::table_view>{std::move(owned_mem)}};
 }
 

@@ -57,6 +57,25 @@ class table {
   table(std::vector<std::unique_ptr<column>>&& columns);
 
   /**
+   * @brief Moves the contents from a vector of `unique_ptr`s to columns to
+   * construct a new table with an explicit row count.
+   *
+   * This is primarily intended for column-less tables, which cannot otherwise
+   * carry a non-zero row count (the row count is normally derived from the
+   * columns). It is used, for example, when converting a column-less Arrow array
+   * that has a non-zero length. When `columns` is non-empty, `num_rows` must equal
+   * the size of every column.
+   *
+   * @throws cudf::logic_error if `columns` is non-empty and `num_rows` does not
+   * match the size of every column.
+   *
+   * @param columns The vector of `unique_ptr`s to columns whose contents will
+   * be moved into the new table.
+   * @param num_rows The number of rows in the table.
+   */
+  table(std::vector<std::unique_ptr<column>>&& columns, size_type num_rows);
+
+  /**
    * @brief Copy the contents of a `table_view` to construct a new `table`.
    *
    * @param view The view whose contents will be copied to create a new `table`

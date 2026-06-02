@@ -473,6 +473,11 @@ std::unique_ptr<table> from_arrow_host(ArrowSchema const* schema,
                    return get_column_copy(&view, child, type, false, stream, mr);
                  });
 
+  // A zero-column struct still has a length; preserve it as the table row count
+  // (a table built from no columns would otherwise report 0 rows).
+  if (columns.empty()) {
+    return std::make_unique<table>(std::move(columns), static_cast<size_type>(input->array.length));
+  }
   return std::make_unique<table>(std::move(columns));
 }
 

@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -427,6 +428,10 @@ class packed_metadata_view {
   // Span from the first top-level column entry to the end of the metadata buffer.
   std::span<std::uint8_t const> _entries;
   size_type _num_columns{};
+  // Table row count recorded in the stub entry, present only for zero-column
+  // tables (which have no columns to derive it from). std::nullopt for tables
+  // with columns, where num_rows() derives the count from the first column.
+  std::optional<size_type> _num_rows;
 };
 
 /** @} */

@@ -84,6 +84,29 @@ def test_chunked_pack(bufsize, stream):
     assert_table_eq(h_table, result)
 
 
+def test_pack_and_unpack_zero_columns_with_rows():
+    # A zero-column table with rows must round-trip its row count.
+    # See https://github.com/rapidsai/cudf/issues/21428
+    tbl = plc.Table([], num_rows=10)
+    packed = plc.contiguous_split.pack(tbl)
+
+    res = plc.contiguous_split.unpack(packed)
+    assert res.num_columns() == 0
+    assert res.num_rows() == 10
+
+
+def test_pack_and_unpack_from_memoryviews_zero_columns_with_rows():
+    tbl = plc.Table([], num_rows=10)
+    packed = plc.contiguous_split.pack(tbl)
+
+    metadata, gpudata = packed.release()
+    del packed
+
+    res = plc.contiguous_split.unpack_from_memoryviews(metadata, gpudata)
+    assert res.num_columns() == 0
+    assert res.num_rows() == 10
+
+
 def test_unpack_from_memoryviews_empty_metadata_non_empty_data():
     empty_metadata = memoryview(b"")
     non_empty_data = plc.gpumemoryview(rmm.DeviceBuffer(size=64))

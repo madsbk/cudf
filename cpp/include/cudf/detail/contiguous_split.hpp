@@ -12,6 +12,8 @@
 
 #include <rmm/cuda_stream_view.hpp>
 
+#include <optional>
+
 namespace cudf {
 namespace detail {
 
@@ -46,8 +48,13 @@ class metadata_builder {
    * @brief Construct a new metadata_builder.
    *
    * @param num_root_columns is the number of top-level columns
+   * @param num_rows the table row count to record, or std::nullopt to not
+   *        record one. A row count is only needed to preserve the rows of a
+   *        table with zero columns; for tables with one or more columns the row
+   *        count is derived from the columns, so std::nullopt should be passed.
    */
-  explicit metadata_builder(size_type const num_root_columns);
+  explicit metadata_builder(size_type const num_root_columns,
+                            std::optional<size_type> const num_rows = std::nullopt);
 
   /**
    * @brief Destructor that will be implemented as default, required because metadata_builder_impl

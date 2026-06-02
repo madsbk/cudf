@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2019-2024, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2019-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
@@ -69,6 +69,25 @@ class table_view_base {
    * @param cols The vector of columns to construct the table from
    */
   explicit table_view_base(std::vector<ColumnView> const& cols);
+
+  /**
+   * @brief Construct a table from a vector of column views with an explicit row count.
+   *
+   * This is primarily intended for column-less tables, which cannot otherwise carry
+   * a non-zero row count (the row count is normally derived from the columns). When
+   * `cols` is non-empty, `num_rows` must equal the size of every column. A two-argument
+   * constructor is used (rather than a `table_view(size_type)` overload) because a
+   * single-argument converting constructor would make `size_type` implicitly
+   * convertible to a table view and silently render overloads such as
+   * `hash_partition(table_view, std::vector<size_type>, ...)` versus
+   * `hash_partition(table_view, table_view, ...)` ambiguous for brace-init calls.
+   *
+   * @throws cudf::logic_error If `cols` is non-empty and any view's size does not equal `num_rows`
+   *
+   * @param cols The vector of columns to construct the table from
+   * @param num_rows The number of rows in the table
+   */
+  table_view_base(std::vector<ColumnView> const& cols, size_type num_rows);
 
   /**
    * @brief Returns an iterator to the first view in the `table`.

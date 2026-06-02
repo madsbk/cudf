@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2018-2024, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2018-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -40,6 +40,16 @@ table_view_base<ColumnView>::table_view_base(std::vector<ColumnView> const& cols
   } else {
     _num_rows = 0;
   }
+}
+
+template <typename ColumnView>
+table_view_base<ColumnView>::table_view_base(std::vector<ColumnView> const& cols,
+                                             size_type num_rows)
+  : _columns{cols}, _num_rows{num_rows}
+{
+  std::for_each(_columns.begin(), _columns.end(), [num_rows](ColumnView col) {
+    CUDF_EXPECTS(col.size() == num_rows, "Column size mismatch.");
+  });
 }
 
 // Explicit instantiation for a table of `column_view`s

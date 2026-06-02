@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2019-2026, NVIDIA CORPORATION.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -41,6 +41,18 @@ table::table(std::vector<std::unique_ptr<column>>&& columns) : _columns{std::mov
   }
 }
 
+// Move the contents of a vector of `unique_ptr<column>` with an explicit row count
+table::table(std::vector<std::unique_ptr<column>>&& columns, size_type num_rows)
+  : _columns{std::move(columns)}, _num_rows{num_rows}
+{
+  for (auto const& c : _columns) {
+    CUDF_EXPECTS(c, "Unexpected null column");
+    CUDF_EXPECTS(
+      c->size() == num_rows,
+      "Column size mismatch: " + std::to_string(c->size()) + " != " + std::to_string(num_rows));
+  }
+}
+
 // Copy the contents of a `table_view`
 table::table(table_view view, rmm::cuda_stream_view stream, rmm::device_async_resource_ref mr)
   : _num_rows{view.num_rows()}
@@ -68,7 +80,8 @@ table_view table::view() const
   for (auto const& c : _columns) {
     views.push_back(c->view());
   }
-  return table_view{views};
+  // Pass the explicit row count so a zero-column table preserves its rows.
+  return table_view{views, _num_rows};
 }
 
 // Create mutable view
@@ -79,7 +92,8 @@ mutable_table_view table::mutable_view()
   for (auto const& c : _columns) {
     views.push_back(c->mutable_view());
   }
-  return mutable_table_view{views};
+  // Pass the explicit row count so a zero-column table preserves its rows.
+  return mutable_table_view{views, _num_rows};
 }
 
 // Release ownership of columns

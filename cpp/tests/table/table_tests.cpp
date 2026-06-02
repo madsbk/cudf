@@ -45,6 +45,52 @@ TEST_F(TableTest, EmptyColumnedTable)
   EXPECT_EQ(input.num_columns(), expected);
 }
 
+TEST_F(TableTest, ZeroColumnsExplicitRowCount)
+{
+  // A zero-column table can carry an explicit row count.
+  // See https://github.com/rapidsai/cudf/issues/21428
+  TView input{std::vector<column_view>{}, 42};
+  EXPECT_EQ(input.num_columns(), 0);
+  EXPECT_EQ(input.num_rows(), 42);
+
+  // For a table with columns, the explicit row count must match the columns.
+  column_wrapper<int32_t> col{{1, 2, 3}};
+  std::vector<column_view> cols{col};
+  EXPECT_NO_THROW((TView{cols, 3}));
+  EXPECT_THROW((TView{cols, 4}), cudf::logic_error);
+}
+
+TEST_F(TableTest, OwningTablePropagatesZeroColumnRowCount)
+{
+  // An owning table built from a zero-column/N-row view preserves the rows,
+  // and its view() reports them back.
+  TView view_in{std::vector<column_view>{}, 5};
+  Table owning(view_in);
+  EXPECT_EQ(owning.num_columns(), 0);
+  EXPECT_EQ(owning.num_rows(), 5);
+  EXPECT_EQ(owning.view().num_rows(), 5);
+}
+
+TEST_F(TableTest, OwningTableExplicitRowCountConstructor)
+{
+  // A zero-column owning table can be built with an explicit row count.
+  Table empty(CVector{}, 7);
+  EXPECT_EQ(empty.num_columns(), 0);
+  EXPECT_EQ(empty.num_rows(), 7);
+
+  // For a table with columns, the explicit row count must match the columns.
+  {
+    CVector cols;
+    cols.push_back(column_wrapper<int32_t>{1, 2, 3}.release());
+    EXPECT_NO_THROW(Table(std::move(cols), 3));
+  }
+  {
+    CVector cols;
+    cols.push_back(column_wrapper<int32_t>{1, 2, 3}.release());
+    EXPECT_THROW(Table(std::move(cols), 4), cudf::logic_error);
+  }
+}
+
 TEST_F(TableTest, ValidateConstructorTableViewToTable)
 {
   column_wrapper<int8_t> col1{{1, 2, 3, 4}};

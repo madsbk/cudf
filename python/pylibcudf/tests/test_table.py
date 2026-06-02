@@ -53,3 +53,49 @@ def test_table_copy(table_data):
         assert orig_col is not copy_col
 
     assert_table_eq(original.to_arrow(), copied)
+
+
+def test_zero_column_table_num_rows_override():
+    # A table with zero columns can carry an explicit row count.
+    # See https://github.com/rapidsai/cudf/issues/21428
+    tbl = plc.Table([], num_rows=5)
+    assert tbl.num_columns() == 0
+    assert tbl.num_rows() == 5
+    assert tbl.shape() == (5, 0)
+    # The override is preserved by copy().
+    assert tbl.copy().num_rows() == 5
+
+
+def test_zero_column_table_default_num_rows():
+    # Without an override a zero-column table still reports zero rows.
+    assert plc.Table([]).num_rows() == 0
+
+
+def test_zero_column_table_num_rows_mismatch_raises():
+    col = plc.Column.from_arrow(pa.array([1, 2, 3]))
+    with pytest.raises(ValueError):
+        plc.Table([col], num_rows=4)
+
+
+def test_zero_column_table_concatenate_sums_rows():
+    # Concatenating zero-column tables sums their row counts end-to-end.
+    # See https://github.com/rapidsai/cudf/issues/21428
+    result = plc.concatenate.concatenate(
+        [plc.Table([], num_rows=7), plc.Table([], num_rows=5)]
+    )
+    assert result.num_columns() == 0
+    assert result.num_rows() == 12
+
+
+def test_from_arrow_zero_column_preserves_num_rows():
+    # The reported reproduction for https://github.com/rapidsai/cudf/issues/21428:
+    # a zero-width frame (rows but no columns) must round-trip its row count
+    # through from_arrow. polars is used because pyarrow cannot construct a
+    # zero-column / N-row batch.
+    pl = pytest.importorskip("polars")
+    df = pl.DataFrame(height=5)
+    assert df.shape == (5, 0)
+
+    tbl = plc.Table.from_arrow(df)
+    assert tbl.num_columns() == 0
+    assert tbl.num_rows() == 5

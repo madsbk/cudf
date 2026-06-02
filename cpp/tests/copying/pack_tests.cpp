@@ -578,6 +578,33 @@ TEST_F(PackUnpackTest, EmptyTable)
   }
 }
 
+TEST_F(PackUnpackTest, ZeroColumnsWithRows)
+{
+  // A table with zero columns but a non-zero row count must round-trip its
+  // row count. See https://github.com/rapidsai/cudf/issues/21428
+  cudf::table_view t{std::vector<cudf::column_view>{}, 7};
+  EXPECT_EQ(t.num_columns(), 0);
+  EXPECT_EQ(t.num_rows(), 7);
+
+  auto packed   = cudf::pack(t);
+  auto unpacked = cudf::unpack(packed);
+  EXPECT_EQ(unpacked.num_columns(), 0);
+  EXPECT_EQ(unpacked.num_rows(), 7);
+
+  // The row count is carried in the (non-empty) metadata buffer.
+  ASSERT_FALSE(packed.metadata->empty());
+  auto view = cudf::packed_metadata_view(*packed.metadata);
+  EXPECT_EQ(view.num_columns(), 0);
+  EXPECT_EQ(view.num_rows(), 7);
+
+  // A genuinely empty (0-column, 0-row) table still serializes to an empty
+  // metadata buffer (backward compatible).
+  cudf::table_view empty{std::vector<cudf::column_view>{}, 0};
+  auto packed_empty = cudf::pack(empty);
+  EXPECT_TRUE(packed_empty.metadata->empty());
+  EXPECT_EQ(cudf::unpack(packed_empty).num_rows(), 0);
+}
+
 TEST_F(PackUnpackTest, SlicedEmpty)
 {
   // empty sliced column. this is specifically testing the corner case:

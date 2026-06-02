@@ -9,6 +9,10 @@ from rmm.pylibrmm.memory_resource cimport DeviceMemoryResource
 cdef class Table:
     # List[pylibcudf.Column]
     cdef public list _columns
+    # Optional explicit row count, used to preserve the row count of a table
+    # with zero columns (which otherwise reports zero rows). None means "derive
+    # from the columns". See https://github.com/rapidsai/cudf/issues/21428
+    cdef public object _num_rows
 
     cdef table_view view(self) nogil
 

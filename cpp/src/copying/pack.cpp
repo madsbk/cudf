@@ -15,6 +15,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,13 @@ namespace {
  * The metadata field of the `packed_columns` struct is simply an array of these.
  * This struct is exposed here because it is needed by both contiguous_split, pack
  * and unpack.
+ *
+ * The first entry is a table-header stub (`type == EMPTY`) rather than a real column.
+ * For that stub the fields are reused: `size` holds the number of top-level columns
+ * and `null_count` holds the table row count. The row count is only meaningful for a
+ * table with zero columns (which has no columns to derive it from); for tables with
+ * columns the row count is derived from the columns. Use `stub_num_columns()` and
+ * `stub_num_rows()` to read these instead of the raw fields.
  */
 struct serialized_column {
   serialized_column() = default;
@@ -76,6 +84,12 @@ serialized_column read_entry(std::uint8_t const* ptr, std::uint8_t const* buffer
   std::memcpy(&entry, ptr, serialized_column_size);
   return entry;
 }
+
+// The metadata's first entry is a header stub whose fields are reused (see serialized_column):
+// `size` holds the number of top-level columns and `null_count` holds the table row count. These
+// accessors document that reuse.
+[[nodiscard]] size_type stub_num_columns(serialized_column const& stub) { return stub.size; }
+[[nodiscard]] size_type stub_num_rows(serialized_column const& stub) { return stub.null_count; }
 
 // Returns the total number of serialized_column entries in the subtree
 // rooted at the entry at `ptr` (including that entry itself).
@@ -183,8 +197,10 @@ table_view unpack(uint8_t const* metadata, uint8_t const* gpu_data)
   // gpu data can be null if everything is empty but the metadata must always be valid
   CUDF_EXPECTS(metadata != nullptr, "Encountered invalid packed column input");
   uint8_t const* base_ptr = gpu_data;
-  // first entry is a stub where size == the total # of top level columns (see pack_metadata above)
-  auto const num_columns = read_entry(metadata).size;
+  // the first entry is a table-header stub (see serialized_column)
+  auto const stub        = read_entry(metadata);
+  auto const num_columns = stub_num_columns(stub);
+  auto const num_rows    = stub_num_rows(stub);
   // current_ptr tracks position in the metadata byte buffer
   auto const* current_ptr = metadata + serialized_column_size;
 
@@ -203,7 +219,10 @@ table_view unpack(uint8_t const* metadata, uint8_t const* gpu_data)
     return cols;
   };
 
-  return table_view{get_columns(num_columns)};
+  auto const cols = get_columns(num_columns);
+  // When there are one or more columns the row count is derived from the columns Only a zero-column
+  // table, which has no columns to derive from, uses the row count recorded in the stub.
+  return num_columns == 0 ? table_view{std::vector<column_view>{}, num_rows} : table_view{cols};
 }
 
 }  // anonymous namespace
@@ -215,8 +234,19 @@ packed_columns pack(cudf::table_view const& input,
                     rmm::cuda_stream_view stream,
                     rmm::device_async_resource_ref mr)
 {
-  // do a contiguous_split with no splits to get the memory for the table
-  // arranged as we want it
+  // A zero-column table has no device data, and contiguous_split produces no
+  // output for it, which would lose the row count. Pack only the metadata
+  // (which records the row count) so an (N, 0) table round-trips correctly
+  // through unpack. A truly empty (0, 0) table still uses the empty
+  // packed_columns representation.
+  if (input.num_columns() == 0 && input.num_rows() > 0) {
+    return packed_columns{
+      std::make_unique<std::vector<uint8_t>>(cudf::pack_metadata(input, nullptr, 0)),
+      std::make_unique<rmm::device_buffer>()};
+  }
+
+  // Perform a contiguous_split with no split points to produce the packed
+  // representation expected by unpack.
   auto contig_split_result = cudf::detail::contiguous_split(input, {}, stream, mr);
   return contig_split_result.empty() ? packed_columns{} : std::move(contig_split_result[0].data);
 }
@@ -267,13 +297,18 @@ class metadata_builder_impl {
   std::vector<serialized_column> metadata;
 };
 
-metadata_builder::metadata_builder(size_type const num_root_columns)
+metadata_builder::metadata_builder(size_type const num_root_columns,
+                                   std::optional<size_type> const num_rows)
   : impl(std::make_unique<metadata_builder_impl>(num_root_columns +
                                                  1 /*one more extra metadata entry as below*/))
 {
-  // first metadata entry is a stub indicating how many total (top level) columns
-  // there are
-  impl->add_column_info_to_meta(data_type{type_id::EMPTY}, num_root_columns, 0, -1, -1, 0);
+  // first metadata entry is the table-header stub (see serialized_column): its
+  // `size` slot records the number of top-level columns and its `null_count`
+  // slot records the table row count. A row count is only recorded for a
+  // zero-column table (which has no columns to derive it from); otherwise it is
+  // left at 0 and the row count is derived from the columns on unpack.
+  impl->add_column_info_to_meta(
+    data_type{type_id::EMPTY}, num_root_columns, num_rows.value_or(0), -1, -1, 0);
 }
 
 metadata_builder::~metadata_builder() = default;
@@ -330,8 +365,12 @@ packed_metadata_view::packed_metadata_view(std::span<uint8_t const> buffer)
                "metadata buffer size is not a multiple of the entry size");
   auto const* end     = buffer.data() + buffer.size();
   auto const* entries = buffer.data() + detail::serialized_column_size;
-  // The first entry is a stub whose `size` field holds the number of top-level columns.
-  _num_columns = detail::read_entry(buffer.data(), end).size;
+  // The first entry is a table-header stub (see serialized_column). The row
+  // count it records is only meaningful for a zero-column table; otherwise the
+  // row count is derived from the columns.
+  auto const stub = detail::read_entry(buffer.data(), end);
+  _num_columns    = detail::stub_num_columns(stub);
+  if (_num_columns == 0) { _num_rows = detail::stub_num_rows(stub); }
   // Validate that the column tree exactly fills the buffer.
   auto const* past_last = detail::skip_subtrees(entries, _num_columns, end);
   CUDF_EXPECTS(past_last == end,
@@ -343,7 +382,10 @@ size_type packed_metadata_view::num_columns() const { return _num_columns; }
 
 size_type packed_metadata_view::num_rows() const
 {
-  if (_num_columns == 0) { return 0; }
+  // A zero-column table has no column to derive the row count from, so it uses
+  // the count recorded in the stub (present iff there are no columns). For
+  // tables with columns the row count is the first column's size.
+  if (_num_columns == 0) { return _num_rows.value_or(0); }
   return detail::read_entry(_entries.data(), _entries.data() + detail::serialized_column_size).size;
 }
 
@@ -374,9 +416,17 @@ std::vector<uint8_t> pack_metadata(table_view const& table,
                                    size_t buffer_size)
 {
   CUDF_FUNC_RANGE();
-  if (table.is_empty()) { return std::vector<uint8_t>{}; }
+  // A truly empty table (no columns and no rows) serializes to an empty buffer.
+  // A table with zero columns but a non-zero row count must still emit the stub
+  // entry so the row count round-trips (the stub carries it in its null_count
+  // slot, see metadata_builder).
+  if (table.num_columns() == 0 && table.num_rows() == 0) { return std::vector<uint8_t>{}; }
 
-  auto builder = cudf::detail::metadata_builder(table.num_columns());
+  // Only a zero-column table records a row count (it has no columns to derive it
+  // from); for tables with columns the row count comes from the columns.
+  auto const num_rows =
+    table.num_columns() == 0 ? std::optional<size_type>{table.num_rows()} : std::nullopt;
+  auto builder = cudf::detail::metadata_builder(table.num_columns(), num_rows);
   return detail::pack_metadata(table, contiguous_buffer, buffer_size, builder);
 }
 
