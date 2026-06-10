@@ -21,6 +21,7 @@ from cudf_polars.dsl.ir import (
     IR,
     DataFrameScan,
     Empty,
+    PythonScan,
     Scan,
     Sink,
 )
@@ -454,6 +455,15 @@ def _(
     ir: Empty, rec: LowerIRTransformer
 ) -> tuple[IR, MutableMapping[IR, PartitionInfo]]:
     return ir, {ir: PartitionInfo(count=1)}  # pragma: no cover
+
+
+@lower_ir_node.register(PythonScan)
+def _(
+    ir: PythonScan, rec: LowerIRTransformer
+) -> tuple[IR, MutableMapping[IR, PartitionInfo]]:
+    nranks = rec.state["nranks"]
+    count = nranks if nranks > 1 else 1
+    return ir, {ir: PartitionInfo(count=count)}
 
 
 def can_use_native_parquet_node(

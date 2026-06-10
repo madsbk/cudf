@@ -636,9 +636,13 @@ nitpick_ignore = [
     ("py:class", "Options"),
     # polars aliases that don't match the public intersphinx targets.
     ("py:class", "pl.DataFrame"),
+    ("py:class", "pl.Expr"),
+    ("py:class", "pl.LazyFrame"),
     ("py:class", "polars.LazyFrame"),
     ("py:class", "polars.DataFrame"),
     ("py:class", "polars.dataframe.frame.DataFrame"),
+    ("py:class", "Loader"),
+    ("py:class", "SchemaDict"),
 ]
 # Temporarily disable nitpick warnings for pandas: https://github.com/pandas-dev/pandas/issues/64584
 nitpick_ignore_regex = [

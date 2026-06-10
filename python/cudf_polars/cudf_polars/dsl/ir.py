@@ -335,7 +335,93 @@ class PythonScan(IR):
         self.predicate = predicate
         self._non_child_args = (schema, options, predicate)
         self.children = ()
-        raise NotImplementedError("PythonScan not implemented")
+
+    def get_hashable(self) -> Hashable:
+        """Return a hashable representation."""
+        scan_fn, with_columns, source_type = self.options
+        return (
+            type(self),
+            tuple(self.schema.items()),
+            id(scan_fn),
+            tuple(with_columns) if with_columns is not None else None,
+            source_type,
+            self.predicate,
+        )
+
+    @classmethod
+    @log_do_evaluate
+    @nvtx_annotate_cudf_polars(message="PythonScan")
+    def do_evaluate(
+        cls,
+        schema: Schema,
+        options: Any,
+        predicate: expr.NamedExpr | None,
+        *,
+        context: IRExecutionContext,
+    ) -> DataFrame:
+        """Evaluate and return a dataframe."""
+        # A pushed-down row limit is rejected during translation, so it is never
+        # passed to the source here (n_rows is always None).
+        scan_fn, with_columns, _source_type = options
+        stream = context.get_cuda_stream()
+        # We pass predicate=None and apply any pushed predicate ourselves on the
+        # GPU below, so the source never filters. The discarded second return
+        # value is the "predicate applied" flag; with no predicate handed to the
+        # source it is always True and carries no information for us.
+        # Each chunk is either a host polars frame or an already-GPU-resident
+        # cudf-polars DataFrame.
+        batches, _ = scan_fn(with_columns, None, None, None)
+        chunks = [
+            batch
+            if isinstance(batch, DataFrame)
+            else DataFrame.from_polars(batch, stream=stream)
+            for batch in batches
+        ]
+        if not chunks:
+            return DataFrame.from_polars(
+                pl.DataFrame(
+                    schema={name: dtype.polars_type for name, dtype in schema.items()}
+                ),
+                stream=stream,
+            )
+        with context.stream_ordered_after(*chunks) as stream:
+            table = (
+                chunks[0].table
+                if len(chunks) == 1
+                else plc.concatenate.concatenate(
+                    [c.table for c in chunks], stream=stream
+                )
+            )
+            df = DataFrame.from_table(
+                table, chunks[0].column_names, chunks[0].dtypes, stream=stream
+            )
+            # Validate the produced schema against the declared (output) schema.
+            # Polars performs this check for
+            # register_io_source(..., validate_schema=True), but the flag is not
+            # exposed to the GPU plan, so we always validate.
+            produced = pl.Schema(
+                zip(
+                    df.column_names,
+                    (dtype.polars_type for dtype in df.dtypes),
+                    strict=True,
+                )
+            )
+            declared = pl.Schema(
+                (name, dtype.polars_type) for name, dtype in schema.items()
+            )
+            if produced != declared:
+                raise pl.exceptions.SchemaError(
+                    f"PythonScan source produced schema {produced} which does not "
+                    f"match the declared schema {declared}"
+                )
+            if predicate is not None:
+                (mask,) = broadcast(
+                    predicate.evaluate(df),
+                    target_length=df.num_rows,
+                    stream=stream,
+                )
+                df = df.filter(mask)
+            return df
 
 
 _COMPARISON_BINOPS = {

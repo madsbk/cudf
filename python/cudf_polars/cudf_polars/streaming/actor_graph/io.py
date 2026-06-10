@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import math
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,7 @@ from rapidsmpf.streaming.core.message import Message
 from cudf_polars.dsl.ir import (
     IR,
     DataFrameScan,
+    PythonScan,
     Sink,
     _prepare_parquet_predicate,
 )
@@ -49,6 +51,7 @@ from cudf_polars.streaming.io import (
     _sink_to_file,
     can_use_native_parquet_node,
 )
+from cudf_polars.streaming.rank_aware_source import RankAwareSource
 
 if TYPE_CHECKING:
     from rapidsmpf.communicator.communicator import Communicator
@@ -286,6 +289,100 @@ def _(
                 rows_per_partition=rows_per_partition,
                 estimated_chunk_bytes=estimated_chunk_bytes,
                 distributed_scan=config_options.executor.cluster != "spmd",
+            )
+        ]
+    }
+    return nodes, channels
+
+
+def _bind_rank(scan_fn: Any, rank: int, nranks: int) -> bool:
+    """
+    Bind the current worker rank into a wrapped :class:`RankAwareSource`.
+
+    Parameters
+    ----------
+    scan_fn
+        Python scan function exported by Polars for a ``PythonScan`` node. For
+        sources created with :func:`polars.io.plugins.register_io_source`, this
+        is the wrapper function that captures the original user-provided source.
+    rank
+        Rank of the current worker.
+    nranks
+        Total number of workers participating in the query.
+
+    Returns
+    -------
+    True if a `RankAwareSource` was found and rebound with rank and nranks.
+    False if the scan function does not wrap a rank-aware source.
+
+    Notes
+    -----
+    Note this reaches into Polars' ``register_io_source`` closure layout (the
+    captured source object). It is the only available hook today; if Polars
+    exposes a supported way to thread state into a source this should move to it.
+    """
+    for cell in getattr(scan_fn, "__closure__", None) or ():
+        func = cell.cell_contents
+        # Unwrap any previous binding so repeated lowering does not stack partials.
+        while isinstance(func, functools.partial):
+            func = func.func
+        if isinstance(func, RankAwareSource):
+            cell.cell_contents = functools.partial(func, rank=rank, nranks=nranks)
+            return True
+    return False
+
+
+@define_actor()
+async def python_scan_node(
+    context: Context,
+    comm: Communicator,
+    ir: PythonScan,
+    ir_context: IRExecutionContext,
+    ch_out: Channel[TableChunk],
+    *,
+    estimated_chunk_bytes: int,
+) -> None:
+    """
+    PythonScan node for rapidsmpf.
+
+    Every rank runs the scan function. A :class:`RankAwareSource` is bound to its
+    rank (so it returns only its rank-local rows), but a plain (rank-unaware)
+    source receives no rank information and would emit the full dataset on every
+    rank. To avoid duplicating rows across ranks, an unbound source on a
+    multi-rank run is executed on rank 0 only.
+    """
+    async with shutdown_on_error(
+        context, ch_out, trace_ir=ir, ir_context=ir_context
+    ) as tracer:
+        bound = _bind_rank(ir.options[0], comm.rank, comm.nranks)
+        if not bound and comm.nranks > 1 and comm.rank != 0:
+            await send_metadata(ch_out, context, ChannelMetadata(local_count=0))
+            await ch_out.drain(context)
+            return
+        await send_metadata(ch_out, context, ChannelMetadata(local_count=1))
+        await read_chunk(
+            context, ir, 0, ch_out, ir_context, estimated_chunk_bytes, tracer=tracer
+        )
+        await ch_out.drain(context)
+
+
+@generate_ir_sub_network.register(PythonScan)
+def _(
+    ir: PythonScan, rec: SubNetGenerator
+) -> tuple[dict[IR, list[Any]], dict[IR, ChannelManager]]:
+    estimated_chunk_bytes = rec.state["config_options"].executor.target_partition_size
+    context = rec.state["context"]
+    ir_context = rec.state["ir_context"]
+    channels: dict[IR, ChannelManager] = {ir: ChannelManager(context)}
+    nodes: dict[IR, list[Any]] = {
+        ir: [
+            python_scan_node(
+                context,
+                rec.state["comm"],
+                ir,
+                ir_context,
+                channels[ir].reserve_input_slot(),
+                estimated_chunk_bytes=estimated_chunk_bytes,
             )
         ]
     }
