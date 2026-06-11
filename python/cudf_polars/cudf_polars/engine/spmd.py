@@ -7,6 +7,8 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import uuid
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
@@ -28,20 +30,25 @@ from rapidsmpf.statistics import Statistics
 from rapidsmpf.streaming.core.context import Context
 
 from cudf_polars.containers import DataFrame, DataType
+from cudf_polars.dsl.translate import Translator
 from cudf_polars.engine.core import (
     ClusterInfo,
     StreamingEngine,
     all_gather_host_data,
     check_reserved_keys,
+    drop_if_replicated,
     evaluate_on_rank,
+    raise_for_translation_errors,
     resolve_rapidsmpf_options,
 )
 from cudf_polars.engine.hardware_binding import (
     HardwareBindingPolicy,
     bind_to_gpu,
 )
+from cudf_polars.engine.partitioned_source import PartitionedSource
 from cudf_polars.streaming.actor_graph.collectives.common import reserve_op_id
 from cudf_polars.streaming.actor_graph.utils import set_memory_resource
+from cudf_polars.unstable import unstable
 from cudf_polars.utils.config import (
     MemoryResourceConfig,
     SPMDContext,
@@ -49,7 +56,6 @@ from cudf_polars.utils.config import (
 )
 
 if TYPE_CHECKING:
-    import uuid
     from collections.abc import Callable
 
     import polars as pl
@@ -72,13 +78,13 @@ def evaluate_pipeline_spmd_mode(
     *,
     collect_metadata: bool = False,
     query_id: uuid.UUID,
-) -> tuple[pl.DataFrame, list[ChannelMetadata] | None]:
+) -> tuple[DataFrame, list[ChannelMetadata] | None]:
     """
     Build and evaluate a RapidsMPF streaming pipeline in SPMD mode.
 
     In SPMD mode every rank executes the same Python/Polars script
     independently.  Each rank owns its local DataFrames, which are
-    treated as rank-local fragments of a larger distributed dataset and
+    treated as rank-local partitions of a larger distributed dataset and
     fed directly into the pipeline.  Collective operations (shuffles,
     all-gathers, etc.) coordinate across ranks to produce a globally
     consistent result.
@@ -101,8 +107,9 @@ def evaluate_pipeline_spmd_mode(
 
     Returns
     -------
-    The concatenated output DataFrame and, if ``collect_metadata`` is
-    True, the list of channel metadata objects; otherwise ``None``.
+    The GPU-resident output :class:`~cudf_polars.containers.DataFrame` and,
+    if ``collect_metadata`` is True, the list of channel metadata objects;
+    otherwise ``None``.
     """
     if config_options.executor.spmd_context is None:
         raise RuntimeError("spmd_context must be set for SPMD mode")
@@ -130,8 +137,8 @@ def allgather_polars_dataframe(
     """
     AllGather a rank-local DataFrame so every rank receives the full result.
 
-    Each rank contributes its local ``local_df`` fragment and receives the
-    concatenation of all ranks' fragments in rank order. This is the SPMD
+    Each rank contributes its local ``local_df`` partition and receives the
+    concatenation of all ranks' partitions in rank order. This is the SPMD
     equivalent of a distributed ``collect``: after the call, every rank holds
     the same complete dataset.
 
@@ -201,7 +208,7 @@ class SPMDEngine(StreamingEngine):
     process runs the *same* Python script independently on its own slice of data.
     When launched with the RapidsMPF launcher `rrun`, multiple identical processes
     are started. Each process owns a rank-local :class:`~polars.LazyFrame`
-    representing its fragment of the distributed dataset. Collective operations,
+    representing its partition of the distributed dataset. Collective operations,
     such as shuffles, all-gathers, and joins, coordinate across ranks to produce
     a globally consistent result.
 
@@ -249,7 +256,7 @@ class SPMDEngine(StreamingEngine):
     **DataFrame and LazyFrame semantics**
 
     Because every rank runs an independent Python process, a :class:`~polars.DataFrame`
-    is always *rank-local* i.e. it contains only that rank's fragment of the distributed
+    is always *rank-local* i.e. it contains only that rank's partition of the distributed
     dataset.  This is true whether the DataFrame originates from a file reader or from
     Python literals.
 
@@ -373,6 +380,9 @@ class SPMDEngine(StreamingEngine):
         self._comm: Communicator | None = comm
         self._ctx: Context | None = None
         self._py_executor: ThreadPoolExecutor | None = None
+        # Live results from execute(); their GPU partitions are freed before the
+        # Context is torn down (reset/shutdown) so they don't outlive its adaptor.
+        self._live_results: weakref.WeakSet[SPMDQueryResult] = weakref.WeakSet()
         exit_stack = contextlib.ExitStack()
         try:
             # Register `_cleanup_ctx`, which shuts down whatever `self._ctx` points
@@ -468,6 +478,18 @@ class SPMDEngine(StreamingEngine):
             engine_options=options.to_engine_options(),
         )
 
+    def _invalidate_live_results(self) -> None:
+        """
+        Drop GPU partitions held by live ``execute()`` results.
+
+        Their device buffers were allocated on the current Context's RMM adaptor,
+        which reset/shutdown tears down; freeing them here (via the live adaptor)
+        keeps them from outliving it. An invalidated result raises if used again.
+        """
+        for result in list(self._live_results):
+            result._invalidate()
+        self._live_results.clear()
+
     def _reset(
         self,
         *,
@@ -496,6 +518,9 @@ class SPMDEngine(StreamingEngine):
         # Collective: synchronize all ranks before tearing down the Context.
         if self._comm.nranks > 1:
             barrier(self._comm)
+        # Free live results' partitions before the Context (and its RMM adaptor)
+        # is torn down; re-collecting an invalidated result afterwards raises.
+        self._invalidate_live_results()
         # Same-thread shutdown, _reset runs on the thread that built the
         # Context (the test driver's main thread). The per-engine RMM
         # resource is kept alive across resets, see :meth:`_cleanup_ctx`.
@@ -659,6 +684,10 @@ class SPMDEngine(StreamingEngine):
         if self._ctx is None:
             return  # already shut down
 
+        # Free live results' partitions before _cleanup_ctx tears down the
+        # Context and its RMM adaptor (see :meth:`_invalidate_live_results`).
+        self._invalidate_live_results()
+
         # Order matters: ``super().shutdown()`` closes ``self._exit_stack``,
         # which invokes ``self._cleanup_ctx``. That requires ``self._ctx`` to
         # still be set so the rapidsmpf Context can be shut down correctly.
@@ -674,3 +703,118 @@ class SPMDEngine(StreamingEngine):
             results = all_gather_host_data(self.comm, self.context.br(), op_id, data)
 
         return [json.loads(r) for r in results]
+
+    @unstable()
+    def execute(self, lf: pl.LazyFrame) -> SPMDQueryResult:
+        """
+        Execute a :class:`~polars.LazyFrame` and return a GPU-resident result.
+
+        Unlike :meth:`~polars.LazyFrame.collect`, this method does not copy the
+        result to host memory.  The returned :class:`SPMDQueryResult` keeps the
+        data on the GPU.  Call :meth:`SPMDQueryResult.lazy` to chain further
+        operations without an intermediate host round-trip.
+
+        This is a collective operation: every rank must call it with an
+        equivalent query.
+
+        Parameters
+        ----------
+        lf
+            The lazy query to execute.
+
+        Returns
+        -------
+        GPU-resident query result.
+
+        Examples
+        --------
+        >>> with SPMDEngine() as engine:  # doctest: +SKIP
+        ...     result = engine.execute(pl.scan_parquet("data/*.parquet"))
+        ...     # Chain further work without copying to host:
+        ...     df = result.lazy().filter(pl.col("x") > 0).collect(engine=engine)
+        """
+        translator = Translator(lf._ldf.visit(), self)
+        ir = translator.translate_ir()
+        raise_for_translation_errors(translator)
+        query_id = uuid.uuid4()
+        df, metadata = evaluate_pipeline_spmd_mode(
+            ir,
+            translator.config_options,
+            collect_metadata=True,
+            query_id=query_id,
+        )
+        df = drop_if_replicated(df, self.rank, metadata)
+        result = SPMDQueryResult(df, self.rank)
+        # Track so the partition can be freed before the Context is torn down.
+        self._live_results.add(result)
+        return result
+
+
+class SPMDQueryResult:
+    """
+    GPU-resident result of an SPMD query.
+
+    Returned by :meth:`SPMDEngine.execute`.  Keeps the output
+    :class:`~cudf_polars.containers.DataFrame` on the GPU until the caller
+    explicitly requests a host copy (e.g. via :attr:`head`) or chains a
+    further query via :meth:`lazy`.
+
+    Parameters
+    ----------
+    df
+        Rank-local GPU-resident output partition.
+    rank
+        Rank of the worker that produced ``df``, used to key the per-rank
+        loader when re-exposing the result via :meth:`lazy`.
+    """
+
+    def __init__(self, df: DataFrame, rank: int) -> None:
+        self._df: DataFrame | None = df
+        self._rank = rank
+
+    def _invalidate(self) -> None:
+        """Drop the GPU partition (its producing Context is being torn down)."""
+        self._df = None
+
+    def _require(self) -> DataFrame:
+        """Return the partition, or raise if this result has been invalidated."""
+        if self._df is None:
+            raise RuntimeError(
+                "This SPMDQueryResult was invalidated when its engine was reset "
+                "or shut down; run execute() again on a live engine."
+            )
+        return self._df
+
+    @property
+    def head(self) -> pl.DataFrame | None:
+        """The first ten rows of the result, copied to host."""
+        return self._require().slice((0, 10)).to_polars()
+
+    @property
+    def n_rows_total(self) -> int | None:
+        """Total number of rows in the rank-local output partition."""
+        return self._require().num_rows
+
+    def lazy(self) -> pl.LazyFrame:
+        """
+        Return a :class:`~polars.LazyFrame` backed by the GPU result.
+
+        Each rank exposes its own rank-local GPU partition as a per-rank loader,
+        so re-collecting with the SPMD engine keeps the data on the GPU with no
+        host round-trip.  Re-collect with the SPMD engine: the GPU partitions
+        cannot be consumed by the default Polars engine.
+
+        The partition is emitted whole (``max_rows_per_chunk=None``): it is
+        already GPU-resident, so slicing it would only add transient device
+        memory without avoiding a host round-trip.
+
+        Returns
+        -------
+        LazyFrame
+        """
+        df = self._require()
+        schema = {
+            name: dtype.polars_type
+            for name, dtype in zip(df.column_names, df.dtypes, strict=True)
+        }
+        return PartitionedSource.register({self._rank: self._require}, schema)

@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from rapidsmpf.streaming.core.context import Context
 
     from cudf_polars.dsl.ir import IR
+    from cudf_polars.dsl.translate import Translator
     from cudf_polars.streaming.base import PartitionInfo
     from cudf_polars.streaming.parallel import ConfigOptions
     from cudf_polars.utils.config import StreamingExecutor
@@ -416,7 +417,7 @@ def execute_ir_on_rank(
     collective_id_map: dict[IR, list[int]],
     *,
     query_id: uuid.UUID,
-) -> tuple[pl.DataFrame, list[ChannelMetadata]]:
+) -> tuple[DataFrame, list[ChannelMetadata]]:
     """
     Execute a Polars IR query on a single rank's GPU.
 
@@ -448,7 +449,7 @@ def execute_ir_on_rank(
     Returns
     -------
     result
-        This rank's output fragment as a Polars DataFrame.
+        This rank's output fragment as a GPU-resident :class:`~cudf_polars.containers.DataFrame`.
     metadata
         Collected channel metadata.
     """
@@ -512,7 +513,7 @@ def execute_ir_on_rank(
             list(ir.schema.values()),
             stream,
         )
-    return df.to_polars(), metadata_collector
+    return df, metadata_collector
 
 
 _RESERVED_EXECUTOR_KEYS: frozenset[str] = frozenset(
@@ -651,7 +652,7 @@ def evaluate_on_rank(
     config_options: ConfigOptions[StreamingExecutor],
     *,
     query_id: uuid.UUID,
-) -> tuple[pl.DataFrame, list[ChannelMetadata]]:
+) -> tuple[DataFrame, list[ChannelMetadata]]:
     """
     Evaluate a polars IR plan on a single rank.
 
@@ -681,7 +682,7 @@ def evaluate_on_rank(
     Returns
     -------
     result
-        This rank's output fragment as a Polars DataFrame.
+        This rank's output fragment as a GPU-resident :class:`~cudf_polars.containers.DataFrame`.
     metadata
         Collected channel metadata.
     """
@@ -707,3 +708,69 @@ def evaluate_on_rank(
             collective_id_map,
             query_id=query_id,
         )
+
+
+def drop_if_replicated(
+    df: DataFrame, rank: int, metadata: list[ChannelMetadata] | None
+) -> DataFrame:
+    """
+    Helper to drop replicated outputs on non-root ranks.
+
+    If the query's final output is marked ``duplicated``, only rank 0 returns the
+    result. All other ranks return a freshly-allocated empty same-schema frame to
+    avoid duplicating data when outputs are combined (and to free the replicated
+    GPU allocation).
+
+    Parameters
+    ----------
+    df
+        This rank's output partition.
+    rank
+        This rank's index within the cluster.
+    metadata
+        Channel metadata for the query.
+
+    Returns
+    -------
+    ``df`` or a freshly-allocated empty same-schema frame.
+    """
+    if rank != 0 and metadata and metadata[-1].duplicated:
+        # empty_like (not slice((0, 0))): a zero-copy slice would keep the full
+        # replicated GPU allocation resident on every non-root rank.
+        return df.empty_like()
+    return df
+
+
+def raise_for_translation_errors(translator: Translator) -> None:
+    """
+    Raise if the translator recorded unsupported operations.
+
+    ``execute()`` has no CPU fallback (it returns a GPU result), so any
+    translation error is fatal here and must be raised before the invalid IR is
+    dispatched to the workers. This mirrors the error formatting of the ordinary
+    ``collect()`` path (see :mod:`cudf_polars.callback`) but always raises,
+    independent of ``raise_on_fail``.
+
+    Parameters
+    ----------
+    translator
+        The translator whose :attr:`~cudf_polars.dsl.translate.Translator.errors`
+        are checked.
+
+    Raises
+    ------
+    NotImplementedError
+        If the query contains operations unsupported on the GPU.
+    """
+    errors = translator.errors
+    if not errors:
+        return
+    unique_errors = sorted(set(errors), key=str)
+    formatted_errors = "\n".join(
+        f"- {e.__class__.__name__}: {e}" for e in unique_errors
+    )
+    raise NotImplementedError(
+        "Query execution with GPU not possible: unsupported operations."
+        f"\nThe errors were:\n{formatted_errors}",
+        unique_errors,
+    )

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
@@ -123,6 +123,37 @@ def test_shallow_copy():
     )
     assert df.column_map["a"].is_sorted == plc.types.Sorted.YES
     assert copy.column_map["a"].is_sorted == plc.types.Sorted.NO
+
+
+def test_empty_like_preserves_schema_and_owns_data():
+    stream = get_cuda_stream()
+    df = DataFrame.from_polars(
+        pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]}), stream=stream
+    )
+
+    empty = df.empty_like()
+
+    assert empty.num_rows == 0
+    assert empty.column_names == df.column_names
+    assert empty.dtypes == df.dtypes
+    # Independently owned: it is a distinct table, not a zero-copy view of df.
+    assert empty.table is not df.table
+    assert_frame_equal(empty.to_polars(), df.to_polars().clear())
+
+
+def test_copy_deep_is_independent_and_preserves_schema():
+    stream = get_cuda_stream()
+    df = DataFrame.from_polars(
+        pl.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]}), stream=stream
+    )
+
+    dup = df.copy_deep()
+
+    assert dup.column_names == df.column_names
+    assert dup.dtypes == df.dtypes
+    # Deep copy: a distinct table owning its own device buffers, same contents.
+    assert dup.table is not df.table
+    assert_frame_equal(dup.to_polars(), df.to_polars())
 
 
 def test_sorted_flags_preserved_empty():

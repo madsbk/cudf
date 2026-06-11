@@ -476,3 +476,50 @@ class DataFrame:
             .from_table(table, self.column_names, self.dtypes, self.stream)
             .sorted_like(self)
         )
+
+    def empty_like(self) -> Self:
+        """
+        Return an independently-owned empty (0-row) frame with the same schema.
+
+        Unlike ``slice((0, 0))`` - which uses the zero-copy
+        :func:`pylibcudf.copying.slice` and so keeps the full underlying device
+        allocation alive - this allocates fresh empty columns, letting the
+        source frame's GPU memory be released once it is dropped.
+
+        Returns
+        -------
+        A new empty dataframe with this frame's column names and dtypes.
+        """
+        return type(self).from_table(
+            plc.copying.empty_like(self.table, stream=self.stream),
+            self.column_names,
+            self.dtypes,
+            self.stream,
+            num_rows=0,
+        )
+
+    def copy_deep(self) -> Self:
+        """
+        Return a deep copy that owns fresh device buffers.
+
+        Unlike :meth:`copy` - a shallow copy that shares the underlying device
+        data - this allocates new device memory on :attr:`stream`, so the result
+        has no other owner. Required before handing a GPU frame that a persistent
+        owner still holds (e.g. a retained query result) to the streaming runtime
+        as an exclusively-owned chunk.
+
+        Returns
+        -------
+        A new dataframe with deep copies of every column.
+        """
+        return (
+            type(self)
+            .from_table(
+                self.table.copy(stream=self.stream),
+                self.column_names,
+                self.dtypes,
+                self.stream,
+                num_rows=self._num_rows_override,
+            )
+            .sorted_like(self)
+        )

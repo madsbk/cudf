@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
@@ -23,21 +24,26 @@ from rapidsmpf.progress_thread import ProgressThread
 from rapidsmpf.statistics import Statistics
 from rapidsmpf.streaming.core.context import Context
 
+from cudf_polars.dsl.translate import Translator
+from cudf_polars.engine import dataframe_store
 from cudf_polars.engine.core import (
     ClusterInfo,
     StreamingEngine,
     check_reserved_keys,
+    drop_if_replicated,
     evaluate_on_rank,
+    raise_for_translation_errors,
     resolve_rapidsmpf_options,
 )
+from cudf_polars.engine.dataframe_store import RetainedBackend, RetainedQueryResult
 from cudf_polars.engine.hardware_binding import (
     HardwareBindingPolicy,
     bind_to_gpu,
 )
+from cudf_polars.unstable import unstable
 from cudf_polars.utils.config import MemoryResourceConfig, RayContext
 
 if TYPE_CHECKING:
-    import uuid
     from collections.abc import Callable
 
     from ray.actor import ActorHandle
@@ -51,6 +57,54 @@ if TYPE_CHECKING:
     from cudf_polars.engine.options import StreamingOptions
     from cudf_polars.streaming.parallel import ConfigOptions
     from cudf_polars.utils.config import StreamingExecutor
+
+
+class RayRetainedBackend(RetainedBackend):
+    """
+    :class:`~cudf_polars.engine.dataframe_store.RetainedBackend` over Ray actors.
+
+    Runs the produce/drop steps by fanning a method out to every
+    :class:`RankActor`. Each actor keeps its own partition GPU-resident and
+    returns only its rank.
+    """
+
+    def __init__(self, rank_actors: list[ActorHandle[RankActor]]) -> None:
+        self._rank_actors = rank_actors
+
+    def execute_retained(
+        self,
+        ir: IR,
+        config_options: ConfigOptions[StreamingExecutor],
+        query_id: uuid.UUID,
+    ) -> list[int]:
+        """Run the query on every actor; each stores its partition and returns its rank."""
+        # Strip ray_context before pickling for the remote calls (actors don't
+        # need the actor list).
+        actor_config_options = dataclasses.replace(
+            config_options,
+            executor=dataclasses.replace(config_options.executor, ray_context=None),
+        )
+        ir_ref = ray.put(ir)
+        try:
+            return ray.get(
+                [
+                    actor.execute_retained.remote(
+                        ir_ref, actor_config_options, query_id=query_id
+                    )
+                    for actor in self._rank_actors
+                ]
+            )
+        except Exception:
+            # An actor may have failed after others already stored their
+            # partition. Drop the query on every actor (idempotent) to avoid
+            # orphaning GPU partitions, then re-raise.
+            with contextlib.suppress(Exception):
+                self.drop_retained(query_id)
+            raise
+
+    def drop_retained(self, query_id: uuid.UUID) -> None:
+        """Drop the query's retained partitions on every actor."""
+        ray.get([actor.drop_retained.remote(query_id) for actor in self._rank_actors])
 
 
 def evaluate_pipeline_ray_mode(
@@ -279,6 +333,11 @@ class RankActor:
         # Collective: all ranks idle before any rank tears down its Context.
         if self._comm.nranks > 1:
             barrier(self._comm)
+        # Drop retained partitions before tearing down the Context: they were
+        # allocated on this Context's RMM adaptor, which is replaced below.
+        # Freeing them now (via the live adaptor) avoids outliving it; this
+        # invalidates any live QueryResult from execute().
+        dataframe_store.clear()
         self._ctx.shutdown()
         self._ctx = None
         self._rapidsmpf_options = Options.deserialize(rapidsmpf_options_as_bytes)
@@ -307,6 +366,11 @@ class RankActor:
         # the process. Shut down the Context explicitly on the same thread
         # that constructed it.
         try:
+            # Drop retained partitions before tearing down the Context: they were
+            # allocated on this Context's RMM adaptor, so freeing them now (while
+            # it is still live) keeps them from outliving their allocator, just as
+            # reset() does. Invalidates any still-alive QueryResult.
+            dataframe_store.clear()
             if self._ctx is not None:
                 self._ctx.shutdown()
         finally:
@@ -381,7 +445,7 @@ class RankActor:
         Returns
         -------
         result
-            This rank's output fragment as a Polars DataFrame.
+            This rank's output partition as a Polars DataFrame.
         metadata
             Collected channel metadata if ``collect_metadata`` is ``True``,
             otherwise ``None``.
@@ -394,9 +458,9 @@ class RankActor:
         if self._ctx is None or self._comm is None:
             raise RuntimeError("setup_worker must be called before evaluate_polars_ir")
         # Ray transfers the returned Polars DataFrame back to the client via the
-        # object store (pickle / Arrow IPC). The DataFrame is already on CPU at
-        # this point (to_polars() copies the result off-GPU), so no GPU memory
-        # crosses process boundaries.
+        # object store (pickle / Arrow IPC). The DataFrame must be on CPU at
+        # this point so no GPU memory crosses process boundaries; to_polars()
+        # performs that copy.
         #
         # evaluate_on_rank always collects metadata internally so we can read
         # metadata[-1].duplicated to decide whether to suppress this rank's
@@ -406,7 +470,7 @@ class RankActor:
         # collected list is returned to the client (see the return statement),
         # which is the cost we care about saving when the caller doesn't need
         # the metadata.
-        df, metadata = evaluate_on_rank(
+        gpu_df, metadata = evaluate_on_rank(
             self._ctx,
             self._comm,
             self._py_executor,
@@ -414,9 +478,51 @@ class RankActor:
             config_options,
             query_id=query_id,
         )
-        if self._comm.rank != 0 and metadata and metadata[-1].duplicated:
-            df = df.clear()
-        return df, metadata if collect_metadata else None
+        gpu_df = drop_if_replicated(gpu_df, self._comm.rank, metadata)
+        return gpu_df.to_polars(), metadata if collect_metadata else None
+
+    def execute_retained(
+        self,
+        ir: IR,
+        config_options: ConfigOptions[StreamingExecutor],
+        *,
+        query_id: uuid.UUID,
+    ) -> int:
+        """
+        Execute a query, keeping this rank's partition GPU-resident on this actor.
+
+        The output partition stays in this actor's process (in the dataframe
+        store, keyed by ``(query_id, rank)``); only the rank is returned, so no
+        data crosses the actor/client boundary. It is read back on this same
+        actor when the result is re-collected.
+
+        Parameters
+        ----------
+        ir
+            The pre-lowered IR tree.
+        config_options
+            Executor configuration forwarded from the client.
+        query_id
+            Unique identifier for the query.
+
+        Returns
+        -------
+        This actor's communicator rank.
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`setup_worker` has not been called first.
+        """
+        if self._ctx is None or self._comm is None:
+            raise RuntimeError("setup_worker must be called before execute_retained")
+        return dataframe_store.store_partition(
+            self._ctx, self._comm, self._py_executor, ir, config_options, query_id
+        )
+
+    def drop_retained(self, query_id: uuid.UUID) -> None:
+        """Drop this query's retained partitions on this actor (idempotent)."""
+        dataframe_store.drop(query_id)
 
     def _run(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         return func(*args, **kwargs)
@@ -811,3 +917,49 @@ class RayEngine(StreamingEngine):
         return ray.get(
             [rank._run.remote(func, *args, **kwargs) for rank in self.rank_actors]
         )
+
+    @unstable()
+    def execute(self, lf: pl.LazyFrame) -> RayQueryResult:
+        """
+        Execute a :class:`~polars.LazyFrame` and return a distributed GPU result.
+
+        Unlike :meth:`~polars.LazyFrame.collect`, the per-rank output stays
+        GPU-resident in its producing actor's process.  Call
+        :meth:`RayQueryResult.lazy` to chain further operations without
+        gathering all data to the client first.
+
+        Parameters
+        ----------
+        lf
+            The lazy query to execute.
+
+        Returns
+        -------
+        Distributed query result backed by per-rank GPU-retained partitions
+        kept in the producing actors.
+
+        Examples
+        --------
+        >>> with RayEngine() as engine:  # doctest: +SKIP
+        ...     result = engine.execute(pl.scan_parquet("data/*.parquet"))
+        ...     df = result.lazy().filter(pl.col("x") > 0).collect(engine=engine)
+        """
+        translator = Translator(lf._ldf.visit(), self)
+        ir = translator.translate_ir()
+        raise_for_translation_errors(translator)
+        query_id = uuid.uuid4()
+        backend = RayRetainedBackend(self.rank_actors)
+        ranks = backend.execute_retained(ir, translator.config_options, query_id)
+        schema = {name: dtype.polars_type for name, dtype in ir.schema.items()}
+        return RayQueryResult(backend, query_id, ranks, schema)
+
+
+class RayQueryResult(RetainedQueryResult):
+    """
+    Distributed result of a Ray query.
+
+    Returned by :meth:`RayEngine.execute`. Each rank's output partition stays
+    GPU-resident in its actor's process; nothing is gathered to the client.
+    Re-collect with the :class:`RayEngine` that produced it (see
+    :class:`~cudf_polars.engine.dataframe_store.RetainedQueryResult`).
+    """

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import logging
@@ -27,17 +28,23 @@ from rapidsmpf.progress_thread import ProgressThread
 from rapidsmpf.statistics import Statistics
 from rapidsmpf.streaming.core.context import Context
 
+from cudf_polars.dsl.translate import Translator
+from cudf_polars.engine import dataframe_store
 from cudf_polars.engine.core import (
     ClusterInfo,
     StreamingEngine,
     check_reserved_keys,
+    drop_if_replicated,
     evaluate_on_rank,
+    raise_for_translation_errors,
     resolve_rapidsmpf_options,
 )
+from cudf_polars.engine.dataframe_store import RetainedBackend, RetainedQueryResult
 from cudf_polars.engine.hardware_binding import (
     HardwareBindingPolicy,
     bind_to_gpu,
 )
+from cudf_polars.unstable import unstable
 from cudf_polars.utils.config import DaskContext, MemoryResourceConfig
 
 if TYPE_CHECKING:
@@ -114,6 +121,129 @@ class _WorkerContext:
     py_executor: ThreadPoolExecutor | None
     base_mr: rmm.mr.DeviceMemoryResource | None
     mr: RmmResourceAdaptor | None = None  # set after `Context` is built (below).
+
+
+def _worker_evaluate_retained(
+    ir: IR,
+    config_options: ConfigOptions[StreamingExecutor],
+    *,
+    uid: str,
+    query_id: uuid.UUID,
+    dask_worker: distributed.Worker | None = None,
+) -> int:
+    """
+    Evaluate a query on this worker, keeping its partition GPU-resident.
+
+    Runs :func:`~cudf_polars.engine.dataframe_store.store_partition` with this
+    worker's rapidsmpf context, so the partition stays in this worker process
+    (in the dataframe store, keyed by ``(query_id, rank)``); only the rank is
+    returned. It is read back on this same worker when the result is
+    re-collected.
+
+    Parameters
+    ----------
+    ir
+        Pre-lowered root IR node.
+    config_options
+        Executor configuration (``dask_context`` is already stripped).
+    uid
+        Unique identifier for the cluster instance.
+    query_id
+        Unique identifier for the query.
+    dask_worker
+        Injected by ``distributed`` when called via :meth:`distributed.Client.run`.
+
+    Returns
+    -------
+    This worker's rank index.
+    """
+    assert dask_worker is not None
+    mp_ctx: _WorkerContext = getattr(dask_worker, f"_cudf_polars_mp_context_{uid}")
+    if mp_ctx.ctx is None or mp_ctx.comm is None or mp_ctx.py_executor is None:
+        raise RuntimeError("_setup_worker must be called before _worker_evaluate")
+    return dataframe_store.store_partition(
+        mp_ctx.ctx, mp_ctx.comm, mp_ctx.py_executor, ir, config_options, query_id
+    )
+
+
+class DaskRetainedBackend(RetainedBackend):
+    """
+    :class:`~cudf_polars.engine.dataframe_store.RetainedBackend` over the Dask client.
+
+    Runs the produce/drop steps via :meth:`distributed.Client.run`. Each
+    worker keeps its own partition GPU-resident and returns only its rank; the
+    owning worker addresses are captured so drops target exactly those workers.
+
+    ``tracked_query_ids`` is the owning engine's set of live query IDs (used by
+    its teardown backstop); this backend removes a query from it whenever the
+    query is dropped, so the set tracks only currently-retained results.
+    """
+
+    def __init__(
+        self, dask_context: DaskContext, tracked_query_ids: set[uuid.UUID]
+    ) -> None:
+        self._client = dask_context.client
+        self._uid = dask_context.rapidsmpf_id
+        self._addresses: tuple[str, ...] = ()
+        self._tracked_query_ids = tracked_query_ids
+
+    def execute_retained(
+        self,
+        ir: IR,
+        config_options: ConfigOptions[StreamingExecutor],
+        query_id: uuid.UUID,
+    ) -> list[int]:
+        """Run the query on every worker; each stores its partition and returns its rank."""
+        # Strip dask_context before pickling for the remote calls.
+        worker_config = dataclasses.replace(
+            config_options,
+            executor=dataclasses.replace(config_options.executor, dask_context=None),
+        )
+        # {worker_address: rank}; the partition for that rank stays there.
+        try:
+            rank_map = self._client.run(
+                functools.partial(_worker_evaluate_retained, uid=self._uid),
+                ir,
+                worker_config,
+                query_id=query_id,
+            )
+        except Exception:
+            # A worker may have failed after others already stored their
+            # partition. We don't know which succeeded (client.run raised before
+            # returning any addresses), so broadcast the drop to every worker
+            # (idempotent) to avoid orphaning GPU partitions, then re-raise.
+            self._drop_and_untrack(query_id, workers=None)
+            raise
+        self._addresses = tuple(rank_map.keys())
+        return list(rank_map.values())
+
+    def drop_retained(self, query_id: uuid.UUID) -> None:
+        """
+        Drop the query's retained partitions on the owning workers (best-effort).
+
+        Removes ``query_id`` from tracking only once every owning worker confirms
+        the drop, so a long-lived engine that repeatedly executes and releases
+        does not accumulate IDs - while a failed drop stays tracked for the
+        shutdown backstop to retry (the finalizer is one-shot).
+        """
+        self._drop_and_untrack(query_id, workers=list(self._addresses))
+
+    def _drop_and_untrack(
+        self, query_id: uuid.UUID, *, workers: list[str] | None
+    ) -> None:
+        """
+        Drop ``query_id`` on ``workers`` (``None`` = all); untrack only if confirmed.
+
+        ``Client.run`` raises if any targeted worker fails to run the drop, so a
+        clean return confirms every owning worker dropped the partition. On
+        failure we keep the ID tracked so the engine's shutdown backstop retries;
+        the exception is swallowed to keep release/finalize best-effort.
+        """
+        try:
+            self._client.run(dataframe_store.drop, query_id, workers=workers)
+        except Exception:
+            return
+        self._tracked_query_ids.discard(query_id)
 
 
 def _setup_root(
@@ -385,7 +515,7 @@ def _worker_evaluate(
     collect_metadata: bool = False,
     query_id: uuid.UUID,
     dask_worker: distributed.Worker | None = None,
-) -> tuple[pl.DataFrame, list[ChannelMetadata] | None]:
+) -> tuple[int, pl.DataFrame, list[ChannelMetadata] | None]:
     """
     Lower and execute a Polars IR query on this Dask worker's GPU.
 
@@ -411,8 +541,10 @@ def _worker_evaluate(
 
     Returns
     -------
+    rank
+        This worker's rank index.
     result
-        This worker's output fragment as a Polars DataFrame.
+        This worker's output partition as a Polars DataFrame.
     metadata
         Collected channel metadata if ``collect_metadata`` is ``True``,
         otherwise ``None``.
@@ -428,7 +560,9 @@ def _worker_evaluate(
     # collect_metadata parameter still controls whether the collected list is
     # returned to the client (see the return statement), which is the cost we
     # care about saving when the caller doesn't need the metadata.
-    df, metadata = evaluate_on_rank(
+    # to_polars() copies the result off-GPU so no GPU memory crosses the
+    # Dask worker/client boundary.
+    gpu_df, metadata = evaluate_on_rank(
         mp_ctx.ctx,
         mp_ctx.comm,
         mp_ctx.py_executor,
@@ -436,9 +570,8 @@ def _worker_evaluate(
         config_options,
         query_id=query_id,
     )
-    if mp_ctx.comm.rank != 0 and metadata and metadata[-1].duplicated:
-        df = df.clear()
-    return df, metadata if collect_metadata else None
+    gpu_df = drop_if_replicated(gpu_df, mp_ctx.comm.rank, metadata)
+    return mp_ctx.comm.rank, gpu_df.to_polars(), metadata if collect_metadata else None
 
 
 def evaluate_pipeline_dask_mode(
@@ -500,13 +633,15 @@ def evaluate_pipeline_dask_mode(
         query_id=query_id,
     )
 
-    dfs: list[pl.DataFrame] = []
+    ranked: list[tuple[int, pl.DataFrame]] = []
     metadata_collector: list[ChannelMetadata] = []
-    for df, md in result_map.values():
-        dfs.append(df)
+    for rank, df, md in result_map.values():
+        ranked.append((rank, df))
         if md is not None:
             metadata_collector.extend(md)
 
+    ranked.sort(key=lambda p: p[0])
+    dfs = [df for _, df in ranked]
     return pl.concat(dfs), metadata_collector or None
 
 
@@ -705,6 +840,10 @@ class DaskEngine(StreamingEngine):
             owned_cluster=owned_cluster,
         )
         self._dask_context: DaskContext | None = dask_ctx
+        # query_ids of retained results produced by this engine, dropped as a
+        # backstop on shutdown (their partitions live on the workers' RMM
+        # resources, which teardown destroys).
+        self._retained_query_ids: set[uuid.UUID] = set()
         super().__init__(
             nranks=nranks,
             executor_options={
@@ -738,6 +877,14 @@ class DaskEngine(StreamingEngine):
         ).serialize()
 
         ctx = self._dask_context
+        # Drop retained partitions before the worker Contexts are torn down:
+        # they were allocated on each worker's current RMM adaptor, which
+        # _reset_worker replaces. Freeing them now (via the live adaptor) avoids
+        # feeding old-context allocations into the new Context; this invalidates
+        # any live QueryResult from execute() (re-collecting after reset raises).
+        if self._retained_query_ids:
+            ctx.client.run(dataframe_store.drop_many, list(self._retained_query_ids))
+            self._retained_query_ids.clear()
         # Reset all worker Contexts collectively. ``client.run`` blocks
         # until every worker's reset returns; the per-worker barrier
         # inside :func:`_reset_worker` synchronizes the teardown across
@@ -861,6 +1008,11 @@ class DaskEngine(StreamingEngine):
         ctx = self._dask_context
         self._dask_context = None
         exceptions: list[Exception] = []
+        # Drop any still-retained partitions before tearing down the workers'
+        # RMM resources they were allocated on (backstop for results not yet
+        # released via GC / release()).
+        with contextlib.suppress(Exception):
+            ctx.client.run(dataframe_store.drop_many, list(self._retained_query_ids))
         try:
             ctx.client.run(functools.partial(_teardown_worker, uid=ctx.rapidsmpf_id))
         except Exception as e:
@@ -876,3 +1028,54 @@ class DaskEngine(StreamingEngine):
 
     def _run(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> list[T]:
         return list(self._dask_ctx.client.run(func, *args, **kwargs).values())
+
+    @unstable()
+    def execute(self, lf: pl.LazyFrame) -> DaskQueryResult:
+        """
+        Execute a :class:`~polars.LazyFrame` and return a distributed result.
+
+        Unlike :meth:`~polars.LazyFrame.collect`, the per-worker outputs are
+        kept as separate partitions rather than being concatenated into a
+        single :class:`~polars.DataFrame`.  Call :meth:`DaskQueryResult.lazy`
+        to chain further operations; re-collecting with :class:`DaskEngine`
+        distributes the N partitions across the N workers.
+
+        Parameters
+        ----------
+        lf
+            The lazy query to execute.
+
+        Returns
+        -------
+        Distributed query result backed by per-rank worker-retained partitions.
+
+        Examples
+        --------
+        >>> with DaskEngine() as engine:  # doctest: +SKIP
+        ...     result = engine.execute(pl.scan_parquet("data/*.parquet"))
+        ...     df = result.lazy().filter(pl.col("x") > 0).collect(engine=engine)
+        """
+        translator = Translator(lf._ldf.visit(), self)
+        ir = translator.translate_ir()
+        raise_for_translation_errors(translator)
+        query_id = uuid.uuid4()
+        backend = DaskRetainedBackend(self._dask_ctx, self._retained_query_ids)
+        # Track for the shutdown backstop *before* dispatch: retained partitions
+        # are allocated on the workers' RMM resources, so any produced (even by a
+        # partially-successful run that then raises) must be dropped before those
+        # resources go away. drop_many at teardown is idempotent.
+        self._retained_query_ids.add(query_id)
+        ranks = backend.execute_retained(ir, translator.config_options, query_id)
+        schema = {name: dtype.polars_type for name, dtype in ir.schema.items()}
+        return DaskQueryResult(backend, query_id, ranks, schema)
+
+
+class DaskQueryResult(RetainedQueryResult):
+    """
+    Distributed result of a Dask query.
+
+    Returned by :meth:`DaskEngine.execute`. Each rank's output partition stays
+    GPU-resident in its worker's process; nothing is gathered to the client.
+    Re-collect with the :class:`DaskEngine` that produced it (see
+    :class:`~cudf_polars.engine.dataframe_store.RetainedQueryResult`).
+    """
