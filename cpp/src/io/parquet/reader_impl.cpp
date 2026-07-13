@@ -24,6 +24,7 @@
 #include <cuda/iterator>
 #include <cuda/std/tuple>
 
+#include <algorithm>
 #include <bitset>
 #include <limits>
 #include <numeric>
@@ -675,12 +676,34 @@ table_with_metadata reader_impl::read_chunk_internal(read_mode mode)
 
   // no work to do (this can happen on the first pass if we have no rows to read)
   if (!has_more_work()) {
-    // Empty dataframe case: Simply initialize to a list of zeros
-    out_metadata.num_rows_per_source =
-      std::vector<size_t>(_file_itm_data.num_rows_per_source.size(), 0);
+    // No passes were scheduled: either no columns are selected (a zero-column read
+    // decodes no data but the table still has `global_num_rows` rows), or there is
+    // genuinely no data / the columned read has been exhausted (an empty table). A
+    // zero-column read is returned as a single (N, 0) chunk; is_first_output_chunk()
+    // then drives has_next() to completion, so no per-chunk row bookkeeping is
+    // needed.
+    auto num_rows = size_type{0};
+    if (_input_columns.empty()) {
+      // A single table holds at most size_type::max() rows.
+      CUDF_EXPECTS(_file_itm_data.global_num_rows <=
+                     static_cast<size_t>(std::numeric_limits<size_type>::max()),
+                   "Number of rows in a zero-column read exceeds the column size limit",
+                   std::overflow_error);
+      num_rows = static_cast<size_type>(_file_itm_data.global_num_rows);
+    }
 
-    // Finalize output
-    return finalize_output(mode, out_metadata, out_columns);
+    // Row-range for synthetic (row/source index) columns; no subpass was scheduled, so it must be
+    // supplied here for them to be generated with the correct offset and length.
+    auto const read_info = row_range{_file_itm_data.global_skip_rows, static_cast<size_t>(num_rows)};
+
+    // The read fits in a single chunk, so the per-source counts are exactly the selected counts
+    // from select_row_groups (an empty result reports zero rows from every source).
+    if (include_output_num_rows_per_source() or _options.prepend_source_index_column) {
+      out_metadata.num_rows_per_source =
+        num_rows == 0 ? std::vector<size_t>(_file_itm_data.num_rows_per_source.size(), 0)
+                      : _file_itm_data.num_rows_per_source;
+    }
+    return finalize_output(mode, out_metadata, out_columns, read_info);
   }
 
   auto& pass            = *_pass_itm_data;
@@ -749,7 +772,7 @@ table_with_metadata reader_impl::read_chunk_internal(read_mode mode)
   }
 
   // Add empty columns if needed. Filter output columns based on filter.
-  return finalize_output(mode, out_metadata, out_columns);
+  return finalize_output(mode, out_metadata, out_columns, read_info);
 }
 
 std::vector<size_t> reader_impl::calculate_output_num_rows_per_source(size_t const chunk_start_row,
@@ -891,7 +914,8 @@ column_selection_options reader_impl::make_column_selection_options(
 
 table_with_metadata reader_impl::finalize_output(read_mode mode,
                                                  table_metadata& out_metadata,
-                                                 std::vector<std::unique_ptr<column>>& out_columns)
+                                                 std::vector<std::unique_ptr<column>>& out_columns,
+                                                 row_range const& read_info)
 {
   CUDF_FUNC_RANGE();
 
@@ -912,13 +936,6 @@ table_with_metadata reader_impl::finalize_output(read_mode mode,
     // Finally, save the output table metadata into `_output_metadata` for reuse next time.
     _output_metadata = std::make_unique<table_metadata>(out_metadata);
   }
-
-  // Row-range of the current output chunk relative to the current row group selection.
-  auto const read_info =
-    (_file_itm_data._current_input_pass < _file_itm_data.num_passes())
-      ? _pass_itm_data->subpass
-          ->output_chunk_read_info[_pass_itm_data->subpass->current_output_chunk]
-      : row_range{0, 0};
 
   // advance output chunk/subpass/pass info for non-empty tables if and only if we are in bounds
   if (_file_itm_data._current_input_pass < _file_itm_data.num_passes()) {
@@ -957,10 +974,22 @@ table_with_metadata reader_impl::finalize_output(read_mode mode,
 
   // check if the output filter AST expression (= _expr_conv.get_converted_expr()) exists
   if (final_filter_expr.has_value()) {
-    auto read_table         = std::make_unique<table>(std::move(out_columns));
+    // When the read has no columns at all (e.g. a column-free filter such as a
+    // literal-true predicate), the row count cannot be derived from columns, so
+    // build the table with the explicit num_rows to preserve it.
+    auto read_table         = out_columns.empty()
+                                ? std::make_unique<table>(std::move(out_columns),
+                                                  static_cast<size_type>(read_info.num_rows))
+                                : std::make_unique<table>(std::move(out_columns));
     auto counting_it        = cuda::counting_iterator<std::size_t>{0};
     auto const output_count = read_table->num_columns() - _num_filter_only_columns;
-    auto only_output        = read_table->select(counting_it, counting_it + output_count);
+    // When every selected column is filter-only the output projects zero columns.
+    // select() of zero columns reports 0 rows, which would drop the surviving rows
+    // through apply_mask/filter, so carry the row count explicitly to preserve a
+    // zero-column / N-row filtered read.
+    auto only_output =
+      output_count == 0 ? cudf::table_view{std::vector<cudf::column_view>{}, read_table->num_rows()}
+                        : read_table->select(counting_it, counting_it + output_count);
 
     if (_num_filter_only_columns > 0) { out_metadata.schema_info.resize(output_count); }
 
@@ -969,7 +998,10 @@ table_with_metadata reader_impl::finalize_output(read_mode mode,
 
     bool use_jit = cudf::get_context().use_jit() || _options.use_jit_filter;
 
-    if (!use_jit) {
+    // When the output projects zero columns there is nothing for the JIT filter
+    // to gather, and cudf::filter rejects a zero-column filter table, so always
+    // take the apply_mask path in that case to preserve the surviving row count.
+    if (!use_jit or output_count == 0) {
       auto predicate =
         cudf::detail::compute_column(*read_table, final_filter_expr.value().get(), _stream, _mr);
       CUDF_EXPECTS(predicate->view().type().id() == type_id::BOOL8,
@@ -985,7 +1017,12 @@ table_with_metadata reader_impl::finalize_output(read_mode mode,
       return {std::move(output_table), std::move(out_metadata)};
     }
   }
-  return {std::make_unique<table>(std::move(out_columns)), std::move(out_metadata)};
+  // When no columns are selected the row count cannot be derived from columns, so
+  // pass it explicitly. Otherwise, it is taken from the columns.
+  return {out_columns.empty() ? std::make_unique<table>(std::move(out_columns),
+                                                        static_cast<size_type>(read_info.num_rows))
+                              : std::make_unique<table>(std::move(out_columns)),
+          std::move(out_metadata)};
 }
 
 table_with_metadata reader_impl::read()
@@ -1021,9 +1058,10 @@ bool reader_impl::has_next()
   prepare_data(read_mode::CHUNKED_READ);
 
   // current_input_pass will only be incremented to be == num_passes after
-  // the last chunk in the last subpass in the last pass has been returned
-  // if not has_more_work then check if this is the first pass in an empty
-  // table and return true so it could be read once.
+  // the last chunk in the last subpass in the last pass has been returned.
+  // If not has_more_work then check if this is the first output chunk and return
+  // true so an empty table (or a zero-column read's single (N, 0) chunk) can be
+  // read once.
   return has_more_work() or is_first_output_chunk();
 }
 

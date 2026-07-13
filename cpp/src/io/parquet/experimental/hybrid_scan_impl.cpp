@@ -24,8 +24,11 @@
 #include <cuda/iterator>
 #include <thrust/host_vector.h>
 
+#include <algorithm>
 #include <iterator>
+#include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <utility>
 
 namespace cudf::io::parquet::experimental::detail {
@@ -192,7 +195,12 @@ void hybrid_scan_reader_impl::select_columns(read_columns_mode read_columns_mode
   // Reset the materialization step flag
   _output_chunk_produced = false;
 
-  CUDF_EXPECTS(_input_columns.size() > 0 and _output_buffers.size() > 0, "No columns selected");
+  // The payload pass may legitimately select zero output columns (a highly-selective filter that
+  // projects no payload columns); the read still preserves the surviving row count. Other modes
+  // require at least one column.
+  if (read_columns_mode != read_columns_mode::PAYLOAD_COLUMNS) {
+    CUDF_EXPECTS(_input_columns.size() > 0 and _output_buffers.size() > 0, "No columns selected");
+  }
 
   // Clear the output buffers templates
   _output_buffers_template.clear();
@@ -852,9 +860,10 @@ bool hybrid_scan_reader_impl::has_next_table_chunk()
   prepare_data(read_mode::CHUNKED_READ, {}, {}, {});
 
   // current_input_pass will only be incremented to be == num_passes after
-  // the last chunk in the last subpass in the last pass has been returned
-  // if not has_more_work then check if this is the first pass in an empty
-  // table and return true so it could be read once.
+  // the last chunk in the last subpass in the last pass has been returned.
+  // If not has_more_work then check if this is the first output chunk and return
+  // true so an empty table (or a zero-column read's single (N, 0) chunk) can be
+  // read once.
   return has_more_work() or is_first_output_chunk();
 }
 
@@ -863,7 +872,7 @@ void hybrid_scan_reader_impl::reset_internal_state()
   _row_mask_offset   = 0;
   _file_itm_data     = file_intermediate_data{};
   _file_preprocessed = false;
-  _has_page_index    = false;
+  _has_page_index           = false;
   _pass_itm_data.reset();
   _pass_page_mask.clear();
   _subpass_page_mask.reset();
@@ -975,15 +984,28 @@ table_with_metadata hybrid_scan_reader_impl::read_chunk_internal(
 
   // no work to do (this can happen on the first pass if we have no rows to read)
   if (!has_more_work()) {
-    // Check if number of rows per source should be included in output metadata.
-    if (include_output_num_rows_per_source()) {
-      // Empty dataframe case: Simply initialize to a list of zeros
-      out_metadata.num_rows_per_source =
-        std::vector<std::size_t>(_file_itm_data.num_rows_per_source.size(), 0);
+    // No passes were scheduled: either no columns are selected (a zero-column read has
+    // global_num_rows rows but decodes no data) or there is genuinely no data / the read is
+    // exhausted (an empty table). A zero-column read is returned as a single (N, 0) chunk;
+    // is_first_output_chunk() then drives has_next_table_chunk() to completion.
+    auto num_rows = size_type{0};
+    if (_input_columns.empty()) {
+      // A single table holds at most size_type::max() rows.
+      CUDF_EXPECTS(_file_itm_data.global_num_rows <=
+                     static_cast<size_t>(std::numeric_limits<size_type>::max()),
+                   "Number of rows in a zero-column read exceeds the column size limit",
+                   std::overflow_error);
+      num_rows = static_cast<size_type>(_file_itm_data.global_num_rows);
     }
 
-    // Finalize output
-    return finalize_output(read_columns_mode, out_metadata, out_columns, row_mask);
+    // The read fits in a single chunk, so the per-source counts are exactly the selected counts
+    // from select_row_groups (an empty result reports zero rows from every source).
+    if (include_output_num_rows_per_source()) {
+      out_metadata.num_rows_per_source =
+        num_rows == 0 ? std::vector<size_t>(_file_itm_data.num_rows_per_source.size(), 0)
+                      : _file_itm_data.num_rows_per_source;
+    }
+    return finalize_output(read_columns_mode, out_metadata, out_columns, row_mask, num_rows);
   }
 
   auto& pass            = *_pass_itm_data;
@@ -1057,7 +1079,13 @@ table_with_metadata hybrid_scan_reader_impl::read_chunk_internal(
   }
 
   // Add empty columns if needed. Filter output columns based on filter.
-  return finalize_output(read_columns_mode, out_metadata, out_columns, row_mask);
+  // read_info.num_rows is the decoded chunk row count, used to preserve the rows of a
+  // zero-column read where the count cannot be derived from columns.
+  return finalize_output(read_columns_mode,
+                         out_metadata,
+                         out_columns,
+                         row_mask,
+                         static_cast<size_type>(read_info.num_rows));
 }
 
 template <typename RowMaskView>
@@ -1065,7 +1093,8 @@ table_with_metadata hybrid_scan_reader_impl::finalize_output(
   read_columns_mode read_columns_mode,
   table_metadata& out_metadata,
   std::vector<std::unique_ptr<column>>& out_columns,
-  RowMaskView row_mask)
+  RowMaskView row_mask,
+  size_type num_rows)
 {
   // Create empty columns as needed (this can happen if we've ended up with no actual data to
   // read)
@@ -1096,8 +1125,10 @@ table_with_metadata hybrid_scan_reader_impl::finalize_output(
 
   apply_decimal_width_cast(out_columns);
 
-  // Create a table from the output columns.
-  auto read_table = std::make_unique<table>(std::move(out_columns));
+  // Create a table from the output columns. When no columns are produced (a zero-column read),
+  // the row count cannot be derived from columns, so pass it explicitly to preserve the rows.
+  auto read_table = out_columns.empty() ? std::make_unique<table>(std::move(out_columns), num_rows)
+                                        : std::make_unique<table>(std::move(out_columns));
 
   // If the input row mask is empty, all rows are pruned anyway.
   if (row_mask.is_empty()) {

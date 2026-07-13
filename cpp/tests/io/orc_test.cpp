@@ -1141,11 +1141,10 @@ TEST_F(OrcWriterTest, SlicedValidMask)
   cudf::test::expect_metadata_equal(expected_metadata, result.metadata);
 }
 
+// Projecting zero columns from an N-row ORC file yields a (N, 0) table that
+// preserves the row count. See https://github.com/rapidsai/cudf/issues/21428
 TEST_F(OrcReaderTest, ZeroColumnsPreservesRowCount)
 {
-  GTEST_SKIP() << "Zero-column / N-row ORC reads are not yet supported. See "
-                  "https://github.com/rapidsai/cudf/issues/22935).";
-
   constexpr cudf::size_type num_rows = 8;
   cudf::test::fixed_width_column_wrapper<int32_t> col{0, 1, 2, 3, 4, 5, 6, 7};
   cudf::table_view input{{col}};

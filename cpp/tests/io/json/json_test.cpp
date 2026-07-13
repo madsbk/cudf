@@ -1016,6 +1016,24 @@ TEST_F(JsonReaderTest, NoDataFile)
   EXPECT_EQ(0, view.num_columns());
 }
 
+// A file of empty JSON objects yields rows with no columns; the row count must
+// be preserved. See https://github.com/rapidsai/cudf/issues/22935
+TEST_F(JsonReaderTest, ZeroColumnsPreservesRowCount)
+{
+  std::string const json_string = "{}\n{}\n{}\n";  // 3 empty objects
+
+  cudf::io::json_reader_options in_options =
+    cudf::io::json_reader_options::builder(
+      cudf::io::source_info{cudf::host_span<std::byte const>{
+        reinterpret_cast<std::byte const*>(json_string.data()), json_string.size()}})
+      .lines(true);
+  auto result = cudf::io::read_json(in_options);
+
+  auto const view = result.tbl->view();
+  EXPECT_EQ(view.num_columns(), 0);
+  EXPECT_EQ(view.num_rows(), 3);
+}
+
 // empty input in values orient
 TEST_F(JsonReaderTest, NoDataFileValues)
 {

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import io
 import os
@@ -640,3 +640,21 @@ def test_read_parquet_filters_jit(
         got,
         check_field_nullability=False,
     )
+
+
+def test_read_parquet_zero_columns_preserves_num_rows(tmp_path):
+    # Projecting no columns from an N-row file yields an (N, 0) table that
+    # preserves the row count. See
+    # https://github.com/rapidsai/cudf/issues/22935
+    tbl = pa.Table.from_pydict({"a": list(range(5))})
+    path = tmp_path / "zero_columns.parquet"
+    write_table(tbl, path)
+
+    options = plc.io.parquet.ParquetReaderOptions.builder(
+        plc.io.SourceInfo([path])
+    ).build()
+    options.set_column_names([])  # project no columns
+
+    result = plc.io.parquet.read_parquet(options)
+    assert result.tbl.num_columns() == 0
+    assert result.tbl.num_rows() == 5

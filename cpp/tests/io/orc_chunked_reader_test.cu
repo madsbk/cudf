@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -166,6 +166,38 @@ TEST_F(OrcChunkedReaderTest, TestChunkedReadNoData)
   EXPECT_EQ(result->num_rows(), 0);
   EXPECT_EQ(result->num_columns(), 2);
   CUDF_TEST_EXPECT_TABLES_EQUAL(*expected, *result);
+}
+
+TEST_F(OrcChunkedReaderTest, ZeroColumnsPreservesRowCount)
+{
+  // A chunked read that projects zero columns must yield a single (N, 0) chunk
+  // and then terminate. Before the fix, has_next() stayed true forever because
+  // the zero-column path never consumed the loaded stripe ranges, so a
+  // while (has_next()) loop would repeat the chunk indefinitely.
+  // See https://github.com/rapidsai/cudf/issues/21428
+  auto constexpr num_rows = 40'000;
+  auto const value_iter   = cuda::counting_iterator<int32_t>{0};
+  std::vector<std::unique_ptr<cudf::column>> input_columns;
+  input_columns.emplace_back(int32s_col(value_iter, value_iter + num_rows).release());
+  auto const [_, filepath] = write_file(input_columns, "chunked_read_zero_columns");
+
+  auto const read_opts = cudf::io::orc_reader_options::builder(cudf::io::source_info{filepath})
+                           .columns(std::vector<std::string>{})
+                           .build();
+  auto reader = cudf::io::chunked_orc_reader(0UL, 0UL, read_opts);
+
+  cudf::size_type total_rows = 0;
+  int num_chunks             = 0;
+  while (reader.has_next()) {
+    auto const chunk = reader.read_chunk();
+    EXPECT_EQ(chunk.tbl->num_columns(), 0);
+    total_rows += chunk.tbl->num_rows();
+    // Guard against the pre-fix infinite loop: fail fast instead of hanging.
+    ASSERT_LT(++num_chunks, 100) << "chunked zero-column read did not terminate";
+  }
+
+  EXPECT_EQ(num_chunks, 1);
+  EXPECT_EQ(total_rows, num_rows);
 }
 
 TEST_F(OrcChunkedReaderTest, TestChunkedReadInvalidParameter)

@@ -738,6 +738,15 @@ table_with_metadata device_parse_nested_json_impl(
     }
   }
 
+  // When no columns are produced (e.g. an array of empty objects, or all columns
+  // pruned) the row count cannot be derived from columns, so pass the record count
+  // explicitly to preserve a zero-column / N-row read.
+  if (out_columns.empty()) {
+    return table_with_metadata{
+      std::make_unique<table>(std::vector<std::unique_ptr<column>>{}, root_col_size),
+      {out_column_names}};
+  }
+
   return table_with_metadata{std::make_unique<table>(std::move(out_columns)), {out_column_names}};
 }
 

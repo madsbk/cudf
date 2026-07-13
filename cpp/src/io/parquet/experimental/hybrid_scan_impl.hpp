@@ -494,7 +494,8 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
   table_with_metadata finalize_output(read_columns_mode read_columns_mode,
                                       table_metadata& out_metadata,
                                       std::vector<std::unique_ptr<column>>& out_columns,
-                                      RowMaskView row_mask);
+                                      RowMaskView row_mask,
+                                      size_type num_rows);
 
   /**
    * @brief Read a chunk of data and return an output table.

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2019-2025, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2019-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -10,17 +10,19 @@
 #include <cudf/detail/copy.hpp>
 
 #include <algorithm>
+#include <limits>
+#include <stdexcept>
 
 namespace cudf::io::orc::detail {
 
 // This is just the proxy to call all other data preprocessing functions.
 void reader_impl::prepare_data(read_mode mode)
 {
-  // There are no columns in the table.
-  if (_selected_columns.num_levels() == 0) { return; }
-
   // This will be no-op if it was called before.
   preprocess_file(mode);
+
+  // There are no columns in the table, so there is no stripe data to load/decode.
+  if (_selected_columns.num_levels() == 0) { return; }
 
   if (!_chunk_read_data.more_table_chunks_to_output()) {
     if (!_chunk_read_data.more_stripes_to_decode() && _chunk_read_data.more_stripes_to_load()) {
@@ -41,8 +43,24 @@ void reader_impl::prepare_data(read_mode mode)
 
 table_with_metadata reader_impl::make_output_chunk()
 {
-  // There are no columns in the table.
-  if (_selected_columns.num_levels() == 0) { return {std::make_unique<table>(), table_metadata{}}; }
+  // There are no columns in the table. Preserve the row count (a zero-column
+  // table cannot derive it from columns). See
+  // https://github.com/rapidsai/cudf/issues/21428
+  if (_selected_columns.num_levels() == 0) {
+    // A zero-column read has `rows_to_read` rows but loads/decodes no stripe data.
+    // Return it as a single (N, 0) table; a single table holds at most
+    // size_type::max() rows.
+    CUDF_EXPECTS(_file_itm_data.rows_to_read <=
+                   static_cast<int64_t>(std::numeric_limits<size_type>::max()),
+                 "Number of rows in a zero-column read exceeds the column size limit",
+                 std::overflow_error);
+    // preprocess_file() populates load_stripe_ranges but this path never consumes
+    // them; advance the load cursor so has_next() reports completion after this chunk.
+    _chunk_read_data.curr_load_stripe_range = _chunk_read_data.load_stripe_ranges.size();
+    return {std::make_unique<table>(std::vector<std::unique_ptr<column>>{},
+                                    static_cast<size_type>(_file_itm_data.rows_to_read)),
+            table_metadata{}};
+  }
 
   // If no rows or stripes to read, return empty columns.
   if (!_chunk_read_data.more_table_chunks_to_output()) {

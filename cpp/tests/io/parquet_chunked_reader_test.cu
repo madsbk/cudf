@@ -205,6 +205,68 @@ struct ParquetChunkedReaderTest : public cudf::test::BaseFixture {};
 
 using ParquetChunkedDecompressionTest = DecompressionTest<ParquetChunkedReaderTest>;
 
+TEST_F(ParquetChunkedReaderTest, ZeroColumnsPreservesRowCount)
+{
+  // A chunked read projecting zero columns must yield a single (N, 0) chunk and
+  // then terminate (has_next() returns false via is_first_output_chunk()).
+  // See https://github.com/rapidsai/cudf/issues/21428
+  auto constexpr num_rows = 60'000;
+  auto const value_iter   = cuda::counting_iterator<int32_t>{0};
+  std::vector<std::unique_ptr<cudf::column>> input_columns;
+  input_columns.emplace_back(int32s_col(value_iter, value_iter + num_rows).release());
+  auto const [_, filepath] =
+    write_file(input_columns, "chunked_read_zero_columns", false /*nullable*/, false /*delta*/);
+
+  auto const read_opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath})
+                           .column_names(std::vector<std::string>{})
+                           .build();
+  auto reader = cudf::io::chunked_parquet_reader(0UL, 0UL, read_opts);
+
+  cudf::size_type total_rows = 0;
+  int num_chunks             = 0;
+  while (reader.has_next()) {
+    auto const chunk = reader.read_chunk();
+    EXPECT_EQ(chunk.tbl->num_columns(), 0);
+    total_rows += chunk.tbl->num_rows();
+    // Guard against a non-terminating loop: fail fast instead of hanging.
+    ASSERT_LT(++num_chunks, 100) << "chunked zero-column read did not terminate";
+  }
+
+  EXPECT_EQ(num_chunks, 1);
+  EXPECT_EQ(total_rows, num_rows);
+}
+
+TEST_F(ParquetChunkedReaderTest, ReadPastExhaustionReturnsEmpty)
+{
+  // Reading past exhaustion on a columned chunked read (here with a prepended
+  // row-index column) must return an empty table, rather than re-deriving the
+  // dataset row count and throwing a column-size mismatch when the N-row
+  // synthetic index column is combined with the zero-row data columns.
+  // See https://github.com/rapidsai/cudf/issues/21428
+  auto constexpr num_rows = 40'000;
+  auto const value_iter   = cuda::counting_iterator<int32_t>{0};
+  std::vector<std::unique_ptr<cudf::column>> input_columns;
+  input_columns.emplace_back(int32s_col(value_iter, value_iter + num_rows).release());
+  auto const [_, filepath] =
+    write_file(input_columns, "chunked_read_past_exhaustion", false /*nullable*/, false /*delta*/);
+
+  auto const read_opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath})
+                           .prepend_row_index_column(true)
+                           .build();
+  auto reader = cudf::io::chunked_parquet_reader(0UL, 0UL, read_opts);
+
+  cudf::size_type total_rows = 0;
+  while (reader.has_next()) {
+    total_rows += reader.read_chunk().tbl->num_rows();
+  }
+  EXPECT_EQ(total_rows, num_rows);
+
+  // The reader is exhausted; reading again must yield an empty table without throwing.
+  EXPECT_FALSE(reader.has_next());
+  auto const extra = reader.read_chunk();
+  EXPECT_EQ(extra.tbl->num_rows(), 0);
+}
+
 TEST_F(ParquetChunkedReaderTest, TestChunkedReadNoData)
 {
   std::vector<std::unique_ptr<cudf::column>> input_columns;

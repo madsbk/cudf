@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import io
 
@@ -492,3 +492,19 @@ def test_utf8_escaped_json_writer(tmp_path):
 # to save time (and since there are no existing tests for these in Python cuDF)
 # mixed_types_as_string = mixed_types_as_string,
 # prune_columns = prune_columns,
+
+
+def test_read_json_zero_columns_preserves_num_rows():
+    # A file of empty JSON objects yields rows with no columns; the row count
+    # must be preserved. See https://github.com/rapidsai/cudf/issues/22935
+    source = b"{}\n{}\n{}\n"  # 3 empty objects
+
+    options = (
+        plc.io.json.JsonReaderOptions.builder(plc.io.SourceInfo([source]))
+        .lines(True)
+        .build()
+    )
+
+    result = plc.io.json.read_json(options)
+    assert result.tbl.num_columns() == 0
+    assert result.tbl.num_rows() == 3

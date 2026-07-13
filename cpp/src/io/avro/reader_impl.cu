@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2020-2026, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2020-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -592,7 +592,11 @@ table_with_metadata read_avro(std::unique_ptr<cudf::io::datasource>&& source,
   metadata_out.user_data          = meta.user_data;
   metadata_out.per_file_user_data = {{meta.user_data.begin(), meta.user_data.end()}};
 
-  return {std::make_unique<table>(std::move(out_columns)), std::move(metadata_out)};
+  // When no columns are selected the row count cannot be derived from columns, so
+  // pass it explicitly. Otherwise, it is taken from the columns.
+  return {out_columns.empty() ? std::make_unique<table>(std::move(out_columns), num_rows)
+                              : std::make_unique<table>(std::move(out_columns)),
+          std::move(metadata_out)};
 }
 
 }  // namespace avro

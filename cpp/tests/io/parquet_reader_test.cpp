@@ -125,11 +125,11 @@ TEST_F(ParquetReaderTest, UserBounds)
   }
 }
 
+// Reading a file with rows but projecting zero columns yields a (N, 0) table
+// that preserves the row count. See
+// https://github.com/rapidsai/cudf/issues/21428
 TEST_F(ParquetReaderTest, ZeroColumnsPreservesRowCount)
 {
-  GTEST_SKIP() << "Zero-column / N-row parquet reads are not yet supported. See "
-                  "https://github.com/rapidsai/cudf/issues/22935).";
-
   srand(31337);
   auto const num_rows = 8;
   auto expected       = create_random_fixed_table<int>(4, num_rows, false);
@@ -146,6 +146,144 @@ TEST_F(ParquetReaderTest, ZeroColumnsPreservesRowCount)
 
   EXPECT_EQ(result.tbl->view().num_columns(), 0);
   EXPECT_EQ(result.tbl->view().num_rows(), num_rows);
+}
+
+TEST_F(ParquetReaderTest, ZeroColumnsWithFilterPreservesRowCount)
+{
+  // A read that projects zero output columns but filters on a (filter-only)
+  // column must preserve the surviving row count, not collapse to (0, 0).
+  // See https://github.com/rapidsai/cudf/issues/21428
+  cudf::test::fixed_width_column_wrapper<int32_t> col{0, 1, 2, 3, 4, 5, 6, 7};
+  cudf::table_view tbl{{col}};
+  cudf::io::table_input_metadata input_metadata(tbl);
+  input_metadata.column_metadata[0].set_name("col0");
+
+  auto filepath = temp_env->get_temp_filepath("ZeroColumnsFilter.parquet");
+  cudf::io::write_parquet(
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, tbl)
+      .metadata(input_metadata)
+      .build());
+
+  // Keep rows where col0 > 4, i.e. {5, 6, 7} (3 rows), while projecting no columns.
+  auto literal_value = cudf::numeric_scalar<int32_t>(4);
+  auto literal       = cudf::ast::literal(literal_value);
+  auto col_ref       = cudf::ast::column_name_reference{"col0"};
+  auto filter_expr   = cudf::ast::operation(cudf::ast::ast_operator::GREATER, col_ref, literal);
+
+  auto read_opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath})
+                     .column_names(std::vector<std::string>{})
+                     .filter(filter_expr)
+                     .build();
+  auto result = cudf::io::read_parquet(read_opts);
+
+  EXPECT_EQ(result.tbl->view().num_columns(), 0);
+  EXPECT_EQ(result.tbl->view().num_rows(), 3);
+}
+
+TEST_F(ParquetReaderTest, ZeroColumnsWithColumnFreeFilterPreservesRowCount)
+{
+  // A read that projects zero columns and applies a filter referencing no columns
+  // (e.g. a literal-true predicate) schedules no passes, so out_columns is empty
+  // when the filter is applied. The row count must still be preserved.
+  // See https://github.com/rapidsai/cudf/issues/21428
+  srand(31337);
+  auto const num_rows = 8;
+  auto expected       = create_random_fixed_table<int>(4, num_rows, false);
+
+  auto filepath = temp_env->get_temp_filepath("ZeroColumnsLiteralFilter.parquet");
+  cudf::io::write_parquet(
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, *expected));
+
+  auto literal_value = cudf::numeric_scalar<bool>(true);
+  auto literal       = cudf::ast::literal(literal_value);
+  auto filter_expr   = cudf::ast::operation(cudf::ast::ast_operator::IDENTITY, literal);
+
+  auto read_opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath})
+                     .column_names(std::vector<std::string>{})
+                     .filter(filter_expr)
+                     .build();
+  auto result = cudf::io::read_parquet(read_opts);
+
+  EXPECT_EQ(result.tbl->view().num_columns(), 0);
+  EXPECT_EQ(result.tbl->view().num_rows(), num_rows);
+}
+
+TEST_F(ParquetReaderTest, ZeroColumnsWithColumnFreeJitFilterPreservesRowCount)
+{
+  // Same as ZeroColumnsWithColumnFreeFilterPreservesRowCount but with JIT
+  // filtering enabled. When the output projects zero columns there is nothing
+  // for the JIT filter to gather, and cudf::filter rejects a zero-column filter
+  // table, so this must route through the apply_mask path and preserve the row
+  // count. See https://github.com/rapidsai/cudf/issues/21428
+  srand(31337);
+  auto const num_rows = 8;
+  auto expected       = create_random_fixed_table<int>(4, num_rows, false);
+
+  auto filepath = temp_env->get_temp_filepath("ZeroColumnsLiteralJitFilter.parquet");
+  cudf::io::write_parquet(
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, *expected));
+
+  auto literal_value = cudf::numeric_scalar<bool>(true);
+  auto literal       = cudf::ast::literal(literal_value);
+  auto filter_expr   = cudf::ast::operation(cudf::ast::ast_operator::IDENTITY, literal);
+
+  auto read_opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath})
+                     .column_names(std::vector<std::string>{})
+                     .filter(filter_expr)
+                     .use_jit_filter(true)
+                     .build();
+  auto result = cudf::io::read_parquet(read_opts);
+
+  EXPECT_EQ(result.tbl->view().num_columns(), 0);
+  EXPECT_EQ(result.tbl->view().num_rows(), num_rows);
+}
+
+// A zero-column read that prepends synthetic index columns must generate them over the actual
+// row range, producing an (N, k) table rather than collapsing to zero rows.
+// See https://github.com/rapidsai/cudf/issues/22935
+TEST_F(ParquetReaderTest, ZeroColumnsWithPrependedIndexColumns)
+{
+  constexpr cudf::size_type num_rows = 8;
+  auto col                           = cudf::test::fixed_width_column_wrapper<int32_t>(
+    cuda::counting_iterator<int32_t>{0}, cuda::counting_iterator<int32_t>{num_rows});
+  cudf::table_view tbl{{col}};
+
+  auto filepath = temp_env->get_temp_filepath("ZeroColumnsPrependIndex.parquet");
+  cudf::io::write_parquet(
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, tbl));
+
+  auto const expected_row_index = cudf::detail::make_counting_transform_iterator(
+    0, [](cudf::size_type i) -> size_t { return i; });
+
+  // Project zero columns, prepend only the row-index column: result is (num_rows, 1).
+  {
+    auto read_opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath})
+                       .column_names(std::vector<std::string>{})
+                       .prepend_row_index_column(true)
+                       .build();
+    auto const result = cudf::io::read_parquet(read_opts);
+
+    EXPECT_EQ(result.tbl->view().num_columns(), 1);
+    EXPECT_EQ(result.tbl->view().num_rows(), num_rows);
+    EXPECT_EQ(result.metadata.schema_info.front().name, "row_index");
+    auto const expected = cudf::test::fixed_width_column_wrapper<size_t>(
+      expected_row_index, expected_row_index + num_rows);
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(result.tbl->view().column(0), expected);
+  }
+
+  // Project zero columns, prepend both synthetic columns: result is (num_rows, 2), no size
+  // mismatch.
+  {
+    auto read_opts = cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath})
+                       .column_names(std::vector<std::string>{})
+                       .prepend_source_index_column(true)
+                       .prepend_row_index_column(true)
+                       .build();
+    auto const result = cudf::io::read_parquet(read_opts);
+
+    EXPECT_EQ(result.tbl->view().num_columns(), 2);
+    EXPECT_EQ(result.tbl->view().num_rows(), num_rows);
+  }
 }
 
 TEST_F(ParquetReaderTest, UserBoundsWithNulls)

@@ -311,11 +311,14 @@ class reader_impl {
    * @param mode Value indicating if the data sources are read all at once or chunk by chunk
    * @param out_metadata The output table metadata
    * @param out_columns The columns for building the output table
+   * @param num_rows The number of rows in this output chunk, used to preserve the row count when
+   *        no columns are selected (a zero-column table cannot derive its rows from columns)
    * @return The output table along with columns' metadata
    */
   table_with_metadata finalize_output(read_mode mode,
                                       table_metadata& out_metadata,
-                                      std::vector<std::unique_ptr<column>>& out_columns);
+                                      std::vector<std::unique_ptr<column>>& out_columns,
+                                      row_range const& read_info);
 
   /**
    * @brief Allocate data buffers for the output columns.

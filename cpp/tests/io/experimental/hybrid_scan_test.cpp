@@ -307,6 +307,44 @@ TEST_F(HybridScanTest, FilterRowGroupsOnlyAndScanSelectColumns)
   }
 }
 
+// A highly-selective filter that projects zero payload columns must preserve the
+// surviving row count as an (N, 0) payload table, not collapse to (0, 0).
+// See https://github.com/rapidsai/cudf/issues/22935
+TEST_F(HybridScanTest, ZeroPayloadColumnsPreservesRowCount)
+{
+  srand(0xc0ffee);
+  using T = uint32_t;
+
+  auto constexpr num_concat            = 1;
+  auto [written_table, parquet_buffer] = create_parquet_with_stats<T, num_concat>();
+
+  // Filtering AST - table[0] < 100
+  auto literal_value     = cudf::numeric_scalar<uint32_t>(100);
+  auto literal           = cudf::ast::literal(literal_value);
+  auto col_ref_0         = cudf::ast::column_name_reference("Col0");
+  auto filter_expression = cudf::ast::operation(cudf::ast::ast_operator::LESS, col_ref_0, literal);
+
+  auto stream     = cudf::get_default_stream();
+  auto mr         = cudf::get_current_device_resource_ref();
+  auto aligned_mr = rmm::mr::aligned_resource_adaptor(cudf::get_current_device_resource_ref(),
+                                                      bloom_filter_alignment);
+  auto constexpr case_sensitive_names = false;
+
+  // Project zero payload columns: an empty column-name list selects no columns, and the
+  // expected payload table is `select({})` on the filtered result, i.e. (surviving_rows, 0).
+  auto const payload_column_indices = std::vector<cudf::size_type>{};
+  auto const payload_column_names   = std::vector<std::string>{};
+  std::ignore                       = test_hybrid_scan_column_selection(parquet_buffer,
+                                                  filter_expression,
+                                                  "col0",
+                                                  payload_column_indices,
+                                                  payload_column_names,
+                                                  case_sensitive_names,
+                                                  stream,
+                                                  mr,
+                                                  aligned_mr);
+}
+
 TEST_F(HybridScanTest, FilterDataPagesOnlyAndScanAllColumns)
 {
   srand(0xf00d);

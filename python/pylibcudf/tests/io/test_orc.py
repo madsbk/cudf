@@ -1,5 +1,7 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+import io
 
 import pyarrow as pa
 import pytest
@@ -192,3 +194,20 @@ def test_roundtrip_pa_table(
     )
 
     assert_table_and_meta_eq(pa_table, res, check_field_nullability=False)
+
+
+def test_read_orc_zero_columns_preserves_num_rows():
+    # Projecting no columns from an N-row file yields an (N, 0) table that
+    # preserves the row count. See
+    # https://github.com/rapidsai/cudf/issues/22935
+    pa_table = pa.table({"a": list(range(5))})
+    source = make_source(io.BytesIO(), pa_table, format="orc")
+
+    options = plc.io.orc.OrcReaderOptions.builder(
+        plc.io.types.SourceInfo([source])
+    ).build()
+    options.set_columns([])  # project no columns
+
+    result = plc.io.orc.read_orc(options)
+    assert result.tbl.num_columns() == 0
+    assert result.tbl.num_rows() == 5
