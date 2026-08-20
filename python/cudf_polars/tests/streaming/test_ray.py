@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Tests for Ray execution mode."""
 
@@ -256,4 +256,32 @@ def test_shutdown_skips_when_ray_not_initialized(
         # Defensive: if the guard somehow didn't fire, make sure the
         # actors are released so the next test's fixture isn't blocked.
         if engine._rank_actors is not None:
+            engine.shutdown()
+
+
+def test_gathers_are_in_rank_order(ray_init_options: dict[str, Any]) -> None:
+    for _ in range(3):  # a single run can agree by luck
+        engine = RayEngine(
+            executor_options={"max_rows_per_partition": 10},
+            engine_options={"allow_gpu_sharing": True},
+            num_ranks=4,
+            ray_init_options=ray_init_options,
+        )
+        try:
+            # Each actor's own view: (rank, info) in actor order.
+            reported = ray.get(
+                [actor.get_info.remote() for actor in engine.rank_actors]
+            )
+            assert sorted(rank for rank, _ in reported) == [0, 1, 2, 3]
+
+            # What the gathers must return: the same infos, ordered by the rank
+            # the actor reported rather than by its position.
+            expected = [info for _, info in sorted(reported, key=lambda p: p[0])]
+            infos = engine.gather_cluster_info()
+            assert [info.pid for info in infos] == [info.pid for info in expected]
+
+            # `_run` reaches the same actor for a given rank, so its pids line
+            # up with the cluster info once both are in rank order.
+            assert engine._run(os.getpid) == [info.pid for info in expected]
+        finally:
             engine.shutdown()

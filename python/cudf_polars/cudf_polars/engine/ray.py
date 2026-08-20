@@ -58,6 +58,7 @@ from cudf_polars.utils.config import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from ray import ObjectRef
     from ray.actor import ActorHandle
 
     from cudf_streaming.channel_metadata import ChannelMetadata
@@ -173,8 +174,7 @@ def evaluate_pipeline_ray_mode(
     # Serialize the IR into the Ray object store so actors fetch by reference
     # instead of receiving N copies.
     ir_ref = ray.put(ir)
-    # ray.get() returns results in the same order as the input list of object refs,
-    # guaranteeing that result[i] corresponds to rank_actors[i] (rank order).
+    # `result` is in actor order, which is NOT rank order.
     result = ray.get(
         [
             rank.evaluate_polars_ir.remote(
@@ -423,19 +423,21 @@ class RankActor:
             self._base_mr = None
             ray.actor.exit_actor()
 
-    def get_info(self) -> ClusterInfo:
+    def get_info(self) -> tuple[int, ClusterInfo]:
         """
-        Return diagnostic information about actor placement.
+        Return this actor's rank and diagnostic information about its placement.
 
         Returns
         -------
-        Diagnostic information about this actor's placement and state.
+        The communicator rank and diagnostic information about this actor's
+        placement and state.
         """
-        return ClusterInfo.local()
+        assert self._comm is not None
+        return self._comm.rank, ClusterInfo.local()
 
-    def get_statistics(self, *, clear: bool = False) -> Statistics:
+    def get_statistics(self, *, clear: bool = False) -> tuple[int, Statistics]:
         """
-        Return this rank's :class:`~rapidsmpf.statistics.Statistics` object.
+        Return this rank's index and :class:`~rapidsmpf.statistics.Statistics`.
 
         The returned object is pickled by Ray when sent to the client, so the
         caller receives a detached copy.
@@ -447,16 +449,18 @@ class RankActor:
 
         Returns
         -------
-        The rank's Statistics object (a detached copy if ``clear`` is True).
+        The communicator rank and its Statistics object (a detached copy if
+        ``clear`` is True).
         """
         assert self._ctx is not None
+        assert self._comm is not None
         stats = self._ctx.statistics()
         if clear:
             # Return a deep copy so it survives the in-place clear of `stats`.
             detached = stats.copy()
             stats.clear()
-            return detached
-        return stats
+            return self._comm.rank, detached
+        return self._comm.rank, stats
 
     def evaluate_polars_ir(
         self,
@@ -601,6 +605,12 @@ class RankActor:
 
     def _run(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         return func(*args, **kwargs)
+
+    def _run_with_rank(
+        self, func: Callable[..., T], *args: Any, **kwargs: Any
+    ) -> tuple[int, T]:
+        assert self._comm is not None
+        return self._comm.rank, func(*args, **kwargs)
 
 
 def get_num_gpus_in_ray_cluster() -> int:
@@ -960,15 +970,35 @@ class RayEngine(StreamingEngine):
             raise RuntimeError("rank_actors is not available after shutdown")
         return self._rank_actors
 
+    def _gather_by_rank(self, refs: list[ObjectRef]) -> dict[int, Any]:
+        """
+        Resolve ``(rank, result)`` object refs into results keyed by rank.
+
+        Parameters
+        ----------
+        refs
+            One object ref per actor, each resolving to ``(rank, result)``.
+
+        Returns
+        -------
+        One result per rank, keyed by rank and in rank order.
+        """
+        return dict(sorted(ray.get(refs), key=lambda pair: pair[0]))
+
     def gather_cluster_info(self) -> list[ClusterInfo]:
         """
         Collect diagnostic information from every rank.
 
         Returns
         -------
-        List of :class:`~cudf_polars.engine.core.ClusterInfo`, one per rank.
+        List of :class:`~cudf_polars.engine.core.ClusterInfo`, one per rank,
+        ordered by rank index.
         """
-        return ray.get([rank.get_info.remote() for rank in self.rank_actors])
+        return list(
+            self._gather_by_rank(
+                [rank.get_info.remote() for rank in self.rank_actors]
+            ).values()
+        )
 
     def gather_statistics(self, *, clear: bool = False) -> list[Statistics]:
         """
@@ -984,8 +1014,10 @@ class RayEngine(StreamingEngine):
         List of :class:`~rapidsmpf.statistics.Statistics`, one per rank,
         ordered by rank index.
         """
-        return ray.get(
-            [rank.get_statistics.remote(clear=clear) for rank in self.rank_actors]
+        return list(
+            self._gather_by_rank(
+                [rank.get_statistics.remote(clear=clear) for rank in self.rank_actors]
+            ).values()
         )
 
     def shutdown(self) -> None:
@@ -1050,8 +1082,13 @@ class RayEngine(StreamingEngine):
         self._quent_events_raw.sort(key=lambda x: x["timestamp"])
 
     def _run(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> list[T]:
-        return ray.get(
-            [rank._run.remote(func, *args, **kwargs) for rank in self.rank_actors]
+        return list(
+            self._gather_by_rank(
+                [
+                    rank._run_with_rank.remote(func, *args, **kwargs)
+                    for rank in self.rank_actors
+                ]
+            ).values()
         )
 
     @unstable()
