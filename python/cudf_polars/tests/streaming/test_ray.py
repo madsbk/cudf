@@ -269,19 +269,26 @@ def test_gathers_are_in_rank_order(ray_init_options: dict[str, Any]) -> None:
         )
         try:
             # Each actor's own view: (rank, info) in actor order.
-            reported = ray.get(
-                [actor.get_info.remote() for actor in engine.rank_actors]
-            )
+            actors = engine.rank_actors
+            reported = ray.get([actor.get_info.remote() for actor in actors])
             assert sorted(rank for rank, _ in reported) == [0, 1, 2, 3]
 
-            # What the gathers must return: the same infos, ordered by the rank
-            # the actor reported rather than by its position.
-            expected = [info for _, info in sorted(reported, key=lambda p: p[0])]
-            infos = engine.gather_cluster_info()
-            assert [info.pid for info in infos] == [info.pid for info in expected]
+            # Actor positions that put the ranks in ascending order.
+            ascending = sorted(range(len(actors)), key=lambda i: reported[i][0])
+
+            # What the gathers must return: the infos in rank order.
+            expected = [reported[i][1].pid for i in ascending]
+
+            # Hold the actors in *descending* rank order, so position and rank
+            # are guaranteed to disagree. Whether they happen to disagree on
+            # their own depends on the connection race, so without this the
+            # test can pass against a gather that orders by position.
+            engine._rank_actors = [actors[i] for i in reversed(ascending)]
+
+            assert [info.pid for info in engine.gather_cluster_info()] == expected
 
             # `_run` reaches the same actor for a given rank, so its pids line
             # up with the cluster info once both are in rank order.
-            assert engine._run(os.getpid) == [info.pid for info in expected]
+            assert engine._run(os.getpid) == expected
         finally:
             engine.shutdown()
