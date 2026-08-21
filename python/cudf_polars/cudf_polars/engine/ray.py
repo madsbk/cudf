@@ -174,7 +174,8 @@ def evaluate_pipeline_ray_mode(
     # Serialize the IR into the Ray object store so actors fetch by reference
     # instead of receiving N copies.
     ir_ref = ray.put(ir)
-    # `result` is in actor order, which is NOT rank order.
+    # `result` is in actor order, which is NOT rank order, so each actor
+    # reports its rank and the partitions are sorted before concatenation.
     result = ray.get(
         [
             rank.evaluate_polars_ir.remote(
@@ -187,12 +188,14 @@ def evaluate_pipeline_ray_mode(
             for rank in rank_actors
         ]
     )
-    dfs: list[pl.DataFrame] = []
+    ranked: list[tuple[int, pl.DataFrame]] = []
     metadata_collector: list[ChannelMetadata] = []
-    for df, md in result:
-        dfs.append(df)
+    for rank, df, md in result:
+        ranked.append((rank, df))
         if md is not None:
             metadata_collector.extend(md)
+    ranked.sort(key=lambda pair: pair[0])
+    dfs = [df for _, df in ranked]
 
     if quent_context is not None:
         quent_logger = config_options.executor.ray_context.quent_logger
@@ -470,7 +473,7 @@ class RankActor:
         collect_metadata: bool,
         quent_context: cudf_polars.quent.QuentContext | None,
         query_id: uuid.UUID,
-    ) -> tuple[pl.DataFrame, list[ChannelMetadata] | None]:
+    ) -> tuple[int, pl.DataFrame, list[ChannelMetadata] | None]:
         """
         Lower and execute a Polars IR query on this actor's GPU.
 
@@ -494,6 +497,9 @@ class RankActor:
 
         Returns
         -------
+        rank
+            This actor's communicator rank, which the client sorts by so that
+            the concatenated result does not depend on actor order.
         result
             This rank's output partition as a Polars DataFrame.
         metadata
@@ -537,7 +543,11 @@ class RankActor:
             query_id=query_id,
         )
         gpu_df = drop_if_replicated(gpu_df, self._comm.rank, metadata)
-        return gpu_df.to_polars(), metadata if collect_metadata else None
+        return (
+            self._comm.rank,
+            gpu_df.to_polars(),
+            metadata if collect_metadata else None,
+        )
 
     def execute_persisted(
         self,
