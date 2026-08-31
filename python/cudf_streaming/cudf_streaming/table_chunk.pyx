@@ -12,8 +12,7 @@ from pylibcudf.table cimport Table
 from cudf_streaming.stream_ref cimport stream_ref
 
 from rapidsmpf._detail.exception_handling cimport ex_handler
-from rapidsmpf.memory.buffer_resource cimport (BufferResource,
-                                               cpp_BufferResource)
+from rapidsmpf.memory.buffer_resource cimport BufferResource
 from rapidsmpf.memory.memory_reservation cimport (MemoryReservation,
                                                   cpp_MemoryReservation)
 from rapidsmpf.memory.packed_data cimport PackedData
@@ -82,6 +81,12 @@ cdef extern from * nogil:
             table->copy(*reservation)
         );
     }
+    std::unique_ptr<rapidsmpf::PackedData> cpp_table_into_packed_data(
+        std::unique_ptr<cudf_streaming::table_chunk> &&table,
+        rapidsmpf::MemoryReservation* reservation
+    ) {
+        return std::move(*table).into_packed_data(*reservation);
+    }
     }  // namespace
     """
     unique_ptr[cpp_TableChunk] cpp_release_table_chunk_from_message(
@@ -92,6 +97,9 @@ cdef extern from * nogil:
         unique_ptr[cpp_TableChunk], cpp_MemoryReservation*
     ) except +ex_handler
     unique_ptr[cpp_TableChunk] cpp_table_copy(
+        unique_ptr[cpp_TableChunk], cpp_MemoryReservation*
+    ) except +ex_handler
+    unique_ptr[cpp_PackedData] cpp_table_into_packed_data(
         unique_ptr[cpp_TableChunk], cpp_MemoryReservation*
     ) except +ex_handler
 
@@ -537,19 +545,33 @@ cdef class TableChunk:
             ret = cpp_table_copy(self._handle, res)
         return TableChunk.from_handle(move(ret), self._br)
 
-    def into_packed_data(self, BufferResource br not None):
+    def into_packed_data_cost(self):
+        """
+        Return the device memory :meth:`into_packed_data` allocates.
+
+        Zero when the data is already in packed form, since it is then moved out
+        rather than serialized.
+
+        Returns
+        -------
+        The cost in bytes.
+        """
+        return deref(self.handle_ptr()).into_packed_data_cost()
+
+    def into_packed_data(self, MemoryReservation reservation not None):
         """
         Convert this table chunk to a PackedData, avoiding unnecessary copies.
 
         If the chunk's data is already in packed form (e.g., it arrived over the
         network or was constructed from a :class:`PackedData`), the packed data is
         moved out directly with no copy. Otherwise the table is serialized via
-        ``cudf.pack()``.
+        ``cudf.pack()``, taking :meth:`into_packed_data_cost` bytes from
+        ``reservation``.
 
         Parameters
         ----------
-        br
-            Buffer resource used when packing is required.
+        reservation
+            Device memory reservation covering the pack.
 
         Returns
         -------
@@ -561,17 +583,19 @@ cdef class TableChunk:
         ValueError
             If the data is not already packed and the table is not available
             (i.e., ``is_available() == False``).
+        ReservationError
+            If ``reservation`` is smaller than :meth:`into_packed_data_cost`.
 
         Warnings
         --------
         The original table chunk is released and must not be used after this call.
         """
         cdef unique_ptr[cpp_PackedData] result
-        cdef cpp_BufferResource* _br = br.ptr()
+        cdef cpp_MemoryReservation* res = reservation._handle.get()
         cdef unique_ptr[cpp_TableChunk] handle = self.release_handle()
         with nogil:
-            result = move(deref(handle)).into_packed_data(_br)
-        return PackedData.from_librapidsmpf(move(result), br)
+            result = cpp_table_into_packed_data(move(handle), res)
+        return PackedData.from_librapidsmpf(move(result), reservation.br)
 
     @property
     def shape(self):
