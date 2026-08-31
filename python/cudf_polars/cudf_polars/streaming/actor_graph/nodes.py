@@ -465,31 +465,24 @@ async def fanout_node_unbounded(
                             # We need (num_outputs - 1) copies since last one reuses original
                             num_copies = num_outputs - 1
                             total_copy_cost = msg.copy_cost() * num_copies
-                            available_device_mem = context.br().memory_available(
-                                MemoryType.DEVICE
-                            )
 
-                            # Decide target memory:
-                            # Use device ONLY if message is in device AND we have sufficient headroom.
-                            if (
-                                device_size > 0
-                                and available_device_mem >= total_copy_cost
-                            ):
-                                # Use reserve_device_memory_and_spill to automatically trigger spilling
-                                # if needed to make room for the copy
-                                memory_reservation = (
-                                    context.br().reserve_device_memory_and_spill(
-                                        total_copy_cost,
-                                        allow_overbooking=True,
-                                    )
-                                )
-                            else:
-                                # Use host memory for buffering - much safer
-                                # Downstream consumers will make_available() when they need device memory
-                                memory_reservation = context.br().reserve_or_fail(
-                                    total_copy_cost,
-                                    [MemoryType.PINNED_HOST, MemoryType.HOST],
-                                )
+                            # Decide target memory. Keep the copies on device when
+                            # the message is already there and device has room,
+                            # otherwise buffer on host. Downstream consumers call
+                            # make_available() when they need device memory.
+                            # `reserve_or_fail` takes the first type that fits
+                            # without spilling, so it neither blocks the event loop
+                            # nor races a separate memory_available() check.
+                            memory_reservation = context.br().reserve_or_fail(
+                                total_copy_cost,
+                                [
+                                    MemoryType.DEVICE,
+                                    MemoryType.PINNED_HOST,
+                                    MemoryType.HOST,
+                                ]
+                                if device_size > 0
+                                else [MemoryType.PINNED_HOST, MemoryType.HOST],
+                            )
 
                             # Copy message for each output buffer
                             # Copies are spillable and allow downstream consumers
