@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cudf_streaming.partition_utils import unpack_and_concat
+from cudf_streaming.table_chunk import make_table_chunks_available_or_wait
 from rapidsmpf.streaming.coll.allgather import AllGather
 
 if TYPE_CHECKING:
@@ -49,7 +50,7 @@ class AllGatherManager:
         def __init__(self, manager: AllGatherManager):
             self._manager = manager
 
-        def insert(self, sequence_number: int, chunk: TableChunk) -> None:
+        async def insert(self, sequence_number: int, chunk: TableChunk) -> None:
             """
             Insert a chunk into the AllGather.
 
@@ -61,8 +62,11 @@ class AllGatherManager:
                 The table chunk to insert. Need not be GPU-resident; if spilled,
                 it will be made available internally.
             """
-            chunk = chunk.make_available_and_spill(
-                self._manager.context.br(), allow_overbooking=True
+            chunk, _ = await make_table_chunks_available_or_wait(
+                self._manager.context,
+                chunk,
+                reserve_extra=0,
+                net_memory_delta=0,
             )
             self._manager.allgather.insert(
                 sequence_number,

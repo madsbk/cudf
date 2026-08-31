@@ -231,7 +231,7 @@ async def _collect_small_side_for_broadcast(
         allgather = AllGatherManager(context, comm, collective_id)
         with allgather.inserting() as inserter:
             for s_id in range(len(chunks)):
-                inserter.insert(s_id, chunks.pop(0))
+                await inserter.insert(s_id, chunks.pop(0))
         stream = ir_context.get_cuda_stream()
         gathered = await allgather.extract_concatenated(stream, ir_context=ir_context)
         # When every rank inserted zero chunks, the AllGather has no schema
@@ -408,6 +408,12 @@ async def _broadcast_join(
     )
 
     while (msg := await large_ch.recv(context)) is not None:
+        large_chunk, _ = await make_table_chunks_available_or_wait(
+            context,
+            TableChunk.from_message(msg, br=context.br()),
+            reserve_extra=0,
+            net_memory_delta=0,
+        )
         await _broadcast_join_large_chunk(
             context,
             ir,
@@ -415,9 +421,7 @@ async def _broadcast_join(
             ch_out,
             small_dfs,
             small_child,
-            TableChunk.from_message(msg, br=context.br()).make_available_and_spill(
-                context.br(), allow_overbooking=True
-            ),
+            large_chunk,
             large_child,
             msg.sequence_number,
             small_size,
@@ -574,12 +578,15 @@ async def _join_chunks(
             f"Left: {left_msg.sequence_number}, Right: {right_msg.sequence_number}"
         )
 
-        left_chunk = TableChunk.from_message(
-            left_msg, br=context.br()
-        ).make_available_and_spill(context.br(), allow_overbooking=True)
-        right_chunk = TableChunk.from_message(
-            right_msg, br=context.br()
-        ).make_available_and_spill(context.br(), allow_overbooking=True)
+        (left_chunk, right_chunk), _ = await make_table_chunks_available_or_wait(
+            context,
+            [
+                TableChunk.from_message(left_msg, br=context.br()),
+                TableChunk.from_message(right_msg, br=context.br()),
+            ],
+            reserve_extra=0,
+            net_memory_delta=0,
+        )
 
         input_bytes = sum(
             col.device_buffer_size()

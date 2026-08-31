@@ -498,9 +498,12 @@ async def _distribute_by_group(
     chunk_index = 0
     async with forward_shuffle.inserting() as inserter:
         while (msg := await ch_in.recv(context)) is not None:
-            chunk = TableChunk.from_message(
-                msg, br=context.br()
-            ).make_available_and_spill(context.br(), allow_overbooking=True)
+            chunk, _ = await make_table_chunks_available_or_wait(
+                context,
+                TableChunk.from_message(msg, br=context.br()),
+                reserve_extra=0,
+                net_memory_delta=0,
+            )
             sequence_numbers.append(msg.sequence_number)
             if not skip_insert:
                 # TODO: For duplicated input only rank 0 inserts here, and

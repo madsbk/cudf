@@ -15,7 +15,10 @@ from cudf_streaming.partition_utils import (
     packed_data_from_cudf_packed_columns,
     unpack_and_concat,
 )
-from cudf_streaming.table_chunk import TableChunk
+from cudf_streaming.table_chunk import (
+    TableChunk,
+    make_table_chunks_available_or_wait,
+)
 from pylibcudf.contiguous_split import pack
 from rapidsmpf.streaming.coll.sparse_alltoall import SparseAlltoall
 from rapidsmpf.streaming.core.message import Message
@@ -370,9 +373,12 @@ class _OutputPartitionBuffer:
             if msg is None:
                 self.input_done = True
                 break
-            chunk = TableChunk.from_message(
-                msg, br=self.context.br()
-            ).make_available_and_spill(self.context.br(), allow_overbooking=True)
+            chunk, _ = await make_table_chunks_available_or_wait(
+                self.context,
+                TableChunk.from_message(msg, br=self.context.br()),
+                reserve_extra=0,
+                net_memory_delta=0,
+            )
             if chunk.table_view().num_rows() == 0:
                 continue
             with stream_ordered_after(
