@@ -12,8 +12,7 @@ from rmm.pylibrmm.stream cimport Stream
 
 from rapidsmpf._detail.exception_handling cimport ex_handler
 from rapidsmpf.memory.buffer cimport MemoryType
-from rapidsmpf.memory.buffer_resource cimport (BufferResource,
-                                               cpp_BufferResource)
+from rapidsmpf.memory.buffer_resource cimport BufferResource
 from rapidsmpf.memory.memory_reservation cimport cpp_MemoryReservation
 from rapidsmpf.memory.packed_data cimport cpp_PackedData
 from cudf_streaming.stream_ref cimport stream_ref
@@ -32,7 +31,7 @@ cdef extern from "<cudf_streaming/table_chunk.hpp>" nogil:
         cpp_TableChunk copy(cpp_MemoryReservation& reservation) except +ex_handler
         pair[size_type, size_type] shape() noexcept
         unique_ptr[cpp_PackedData] into_packed_data(
-            cpp_BufferResource* br
+            cpp_MemoryReservation& reservation
         ) except +ex_handler
 
 cdef class TableChunk:

@@ -81,12 +81,6 @@ cdef extern from * nogil:
             table->copy(*reservation)
         );
     }
-    std::unique_ptr<rapidsmpf::PackedData> cpp_table_into_packed_data(
-        std::unique_ptr<cudf_streaming::table_chunk> &&table,
-        rapidsmpf::MemoryReservation* reservation
-    ) {
-        return std::move(*table).into_packed_data(*reservation);
-    }
     }  // namespace
     """
     unique_ptr[cpp_TableChunk] cpp_release_table_chunk_from_message(
@@ -97,9 +91,6 @@ cdef extern from * nogil:
         unique_ptr[cpp_TableChunk], cpp_MemoryReservation*
     ) except +ex_handler
     unique_ptr[cpp_TableChunk] cpp_table_copy(
-        unique_ptr[cpp_TableChunk], cpp_MemoryReservation*
-    ) except +ex_handler
-    unique_ptr[cpp_PackedData] cpp_table_into_packed_data(
         unique_ptr[cpp_TableChunk], cpp_MemoryReservation*
     ) except +ex_handler
 
@@ -594,7 +585,7 @@ cdef class TableChunk:
         cdef cpp_MemoryReservation* res = reservation._handle.get()
         cdef unique_ptr[cpp_TableChunk] handle = self.release_handle()
         with nogil:
-            result = cpp_table_into_packed_data(move(handle), res)
+            result = move(deref(handle)).into_packed_data(deref(res))
         return PackedData.from_librapidsmpf(move(result), reservation.br)
 
     @property
