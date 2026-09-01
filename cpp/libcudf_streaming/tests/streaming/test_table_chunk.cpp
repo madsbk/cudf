@@ -533,7 +533,9 @@ TEST_F(StreamingTableChunk, ToPackedDataRejectsSmallReservation)
                                                 chunk.into_packed_data_cost() - 1,
                                                 rapidsmpf::AllowOverbooking::NO);
   EXPECT_EQ(overbooking, 0);
-  EXPECT_THROW(std::move(chunk).into_packed_data(reservation), rapidsmpf::reservation_error);
+  EXPECT_THROW(
+    { [[maybe_unused]] auto packed = std::move(chunk).into_packed_data(reservation); },
+    rapidsmpf::reservation_error);
 }
 
 TEST_P(StreamingTableChunk, ToMessageUnalignedSize)
