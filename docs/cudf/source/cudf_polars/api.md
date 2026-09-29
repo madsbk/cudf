@@ -42,7 +42,7 @@ Returned by `engine.execute()` to keep query results GPU-resident (see {doc}`exe
 
 ```{eval-rst}
 .. autoclass:: cudf_polars.engine.persisted_result.PersistedQueryResult
-   :members: lazy, release
+   :members: lazy, release, take_local, local_is_duplicated
 ```
 
 ## Configuration
@@ -63,6 +63,8 @@ Returned by `engine.execute()` to keep query results GPU-resident (see {doc}`exe
 
 ```{eval-rst}
 .. autofunction:: cudf_polars.engine.spmd.allgather_polars_dataframe
+
+.. autofunction:: cudf_polars.engine.spmd.use_gpu
 
 .. autofunction:: cudf_polars.streaming.actor_graph.collectives.common.reserve_op_id
 ```

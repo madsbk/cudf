@@ -850,6 +850,7 @@ nitpick_ignore = [
     ("py:class", "Value"),
     ("py:class", "polars.lazyframe.frame.LazyFrame"),
     ("py:class", "cudf_polars.engine.persisted_result.PersistedBackend"),
+    ("py:class", "cudf_polars.containers.DataFrame"),
     # pylibcudf typing aliases rendered as bare names in autodoc signatures.
     ("py:class", "ColumnNameSpec"),
     ("py:class", "CudaStreamLike"),

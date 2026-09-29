@@ -9,9 +9,11 @@ import uuid
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+from cuda.bindings.driver import CUresult
+from cuda.bindings.runtime import cudaError_t
 
 import polars as pl
 from polars import polars as plrs  # type: ignore[attr-defined]
@@ -28,6 +30,7 @@ from cudf_polars.engine.options import StreamingOptions
 from cudf_polars.engine.spmd import (
     SPMDEngine,
     allgather_polars_dataframe,
+    use_gpu,
 )
 from cudf_polars.streaming.actor_graph.collectives.common import reserve_op_id
 from cudf_polars.testing.asserts import assert_gpu_result_equal
@@ -890,3 +893,257 @@ def test_memory_error_hint(spmd_engine: SPMDEngine) -> None:
             pytest.raises(MemoryError, match="target_partition_size"),
         ):
             q.collect(engine=spmd_engine)
+
+
+def test_engine_rejects_gpu_selected_by_ordinal() -> None:
+    """A process that selected a GPU by ordinal is rejected when the engine is built."""
+    with (
+        patch(
+            "cudf_polars.engine.spmd.cuda_runtime.cudaGetDevice",
+            return_value=(cudaError_t.cudaSuccess, 1),
+        ),
+        pytest.raises(RuntimeError, match="ordinal 0, but"),
+    ):
+        SPMDEngine()
+
+
+@pytest.fixture
+def cuda_not_initialized(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Present `use_gpu` with a process in which CUDA has not started yet.
+
+    CUDA is already running in the test process, so the probe is mocked. The
+    visible-device mask is cleared so the worker's own mask cannot leak in.
+    """
+    # setenv first so the variable is restored even when it was unset, since
+    # delenv of a missing variable records nothing and `use_gpu` sets it.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES")
+    monkeypatch.setattr(
+        "cudf_polars.engine.spmd.cuda_driver.cuCtxGetCurrent",
+        lambda: (CUresult.CUDA_ERROR_NOT_INITIALIZED, None),
+    )
+
+
+def _device_count(status: cudaError_t, count: int | None):
+    return patch(
+        "cudf_polars.engine.spmd.cuda_runtime.cudaGetDeviceCount",
+        return_value=(status, count),
+    )
+
+
+@pytest.mark.usefixtures("cuda_not_initialized")
+def test_use_gpu_sets_visible_devices() -> None:
+    """`use_gpu` sets CUDA_VISIBLE_DEVICES and accepts a single visible GPU."""
+    with _device_count(cudaError_t.cudaSuccess, 1):
+        use_gpu(1)
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_use_gpu_rejects_already_initialized_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Once CUDA is up the mask is fixed, and that is reported before touching it.
+
+    Checking the device count afterwards could not catch this: CUDA already
+    running with one different GPU also reports a count of one.
+    """
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(
+        "cudf_polars.engine.spmd.cuda_driver.cuCtxGetCurrent",
+        lambda: (CUresult.CUDA_SUCCESS, None),
+    )
+    with (
+        _device_count(cudaError_t.cudaSuccess, 1),
+        pytest.raises(RuntimeError, match="already initialized"),
+    ):
+        use_gpu("GPU-00000000-0000-0000-0000-000000000001")
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
+
+
+@pytest.mark.usefixtures("cuda_not_initialized")
+def test_use_gpu_rejects_unknown_gpu() -> None:
+    """An index naming no visible GPU is reported as such."""
+    with (
+        _device_count(cudaError_t.cudaErrorNoDevice, None),
+        pytest.raises(RuntimeError, match="no GPU matches"),
+    ):
+        use_gpu(9)
+
+
+@pytest.mark.usefixtures("cuda_not_initialized")
+def test_use_gpu_rejects_several_gpus() -> None:
+    """A value that makes more than one GPU visible is not a single selection."""
+    with (
+        _device_count(cudaError_t.cudaSuccess, 2),
+        pytest.raises(RuntimeError, match="exactly one"),
+    ):
+        use_gpu("0,1")
+
+
+@pytest.mark.usefixtures("cuda_not_initialized")
+def test_use_gpu_indexes_existing_visible_devices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index selects from the existing mask, not the physical devices."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,0")
+    with _device_count(cudaError_t.cudaSuccess, 1):
+        use_gpu(1)
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
+
+
+@pytest.mark.usefixtures("cuda_not_initialized")
+def test_use_gpu_rejects_index_outside_existing_visible_devices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index past the end of the existing mask is reported, naming the mask."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+    with pytest.raises(RuntimeError, match="out of range"):
+        use_gpu(1)
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
+
+
+# ---------------------------------------------------------------------------
+# GPU-resident handoff to torch
+# ---------------------------------------------------------------------------
+
+
+def test_persisted_to_torch_roundtrip(spmd_engine: SPMDEngine) -> None:
+    """The handoff returns this rank's rows, on the GPU, with the right values."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    lf = pl.LazyFrame({"a": [1.0, 2.0, 3.0], "b": [4, 5, 6]})
+    result = spmd_engine.execute(lf.select(pl.col("a") * 2, pl.col("b")))
+    tensors = persisted_to_torch(result, engine=spmd_engine)
+
+    assert set(tensors) == {"a", "b"}
+    assert tensors["a"].device.type == "cuda"
+    assert sorted(tensors["a"].tolist()) == [2.0, 4.0, 6.0]
+    assert sorted(tensors["b"].tolist()) == [4, 5, 6]
+
+
+def test_persisted_to_torch_shares_gpu_memory(spmd_engine: SPMDEngine) -> None:
+    """The tensor is a view of the column, not a copy of it."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0, 3.0]}).select("a"))
+    tensor = persisted_to_torch(result, engine=spmd_engine)["a"]
+    owner = tensor._cudf_polars_owner
+    base = owner.__cuda_array_interface__["data"][0]
+    assert base == tensor.data_ptr()
+
+
+def test_persisted_to_torch_synchronizes_producing_stream(
+    spmd_engine: SPMDEngine,
+) -> None:
+    """The query's stream is synchronized before its buffers are exposed."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import _dataframe_to_torch
+
+    result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0]}).select("a"))
+    df = result.take_local(spmd_engine.rank)
+    df.stream = MagicMock(wraps=df.stream)
+    _dataframe_to_torch(df, None)
+    df.stream.synchronize.assert_called_once_with()
+
+
+def test_persisted_to_torch_column_subset(spmd_engine: SPMDEngine) -> None:
+    """`columns` selects a subset, and an unknown name raises."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    lf = pl.LazyFrame({"a": [1.0], "b": [2.0]})
+    result = spmd_engine.execute(lf.select("a", "b"))
+    assert set(persisted_to_torch(result, engine=spmd_engine, columns=["b"])) == {"b"}
+
+    result = spmd_engine.execute(lf.select("a", "b"))
+    with pytest.raises(KeyError, match="not in result"):
+        persisted_to_torch(result, engine=spmd_engine, columns=["nope"])
+
+
+def test_persisted_to_torch_rejects_nulls(spmd_engine: SPMDEngine) -> None:
+    """A nullable column cannot become a tensor, and says so."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    lf = pl.LazyFrame({"a": [1.0, None, 3.0]})
+    result = spmd_engine.execute(lf.select("a"))
+    with pytest.raises(ValueError, match="contains nulls"):
+        persisted_to_torch(result, engine=spmd_engine)
+
+
+def test_persisted_to_torch_rejects_strings(spmd_engine: SPMDEngine) -> None:
+    """A string column has no tensor equivalent, and says so."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    lf = pl.LazyFrame({"s": ["x", "y"]})
+    result = spmd_engine.execute(lf.select("s"))
+    with pytest.raises(TypeError, match="no zero-copy torch equivalent"):
+        persisted_to_torch(result, engine=spmd_engine)
+
+
+def test_persisted_result_take_local_and_duplicated(spmd_engine: SPMDEngine) -> None:
+    """`take_local` hands back the partition once, and reports its layout."""
+    result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0]}).select("a"))
+    assert result.local_is_duplicated(spmd_engine.rank) is False
+
+    df = result.take_local(spmd_engine.rank)
+    assert df.num_rows == 2
+    with pytest.raises(RuntimeError, match="consumed on read"):
+        result.take_local(spmd_engine.rank)
+
+
+@pytest.mark.parametrize("nranks", [1, 2, 3, 4, 8])
+@pytest.mark.parametrize("nrows", [0, 1, 3, 8, 9, 10, 100])
+def test_chunk_bounds_match_torch_chunk(nrows: int, nranks: int) -> None:
+    """Each rank's slice is exactly the chunk `torch.chunk` gives it."""
+    torch = pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import _chunk_bounds
+
+    chunks = [c.tolist() for c in torch.arange(nrows).chunk(nranks)] if nrows else []
+    chunks += [[]] * (nranks - len(chunks))
+    for rank in range(nranks):
+        start, length = _chunk_bounds(nrows, nranks, rank)
+        assert list(range(start, start + length)) == chunks[rank]
+
+
+def test_ensure_sharded_leaves_sharded_result_alone(spmd_engine: SPMDEngine) -> None:
+    """On a result that is already sharded the flag changes nothing."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0, 3.0]}).select("a"))
+    tensor = persisted_to_torch(result, engine=spmd_engine, ensure_sharded=True)["a"]
+    assert sorted(tensor.tolist()) == [1.0, 2.0, 3.0]
+
+
+def test_ensure_sharded_slices_replicated_result(spmd_engine: SPMDEngine) -> None:
+    """A replicated result is cut down to this rank's `torch.chunk` share."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import persisted_to_torch
+
+    lf = pl.LazyFrame({"a": [1.0, 2.0, 3.0, 4.0, 5.0]})
+    result = spmd_engine.execute(lf.select("a"))
+    # A single-rank engine never replicates, so present this rank as the
+    # first of two holding a replicated copy.
+    engine = MagicMock(rank=spmd_engine.rank, nranks=2)
+    with patch.object(result, "local_is_duplicated", return_value=True):
+        tensor = persisted_to_torch(result, engine=engine, ensure_sharded=True)["a"]
+    assert tensor.tolist() == [1.0, 2.0, 3.0]
+
+
+def test_sliced_partition_converts_at_its_offset(spmd_engine: SPMDEngine) -> None:
+    """A later rank's share starts part-way into the column and still views it."""
+    pytest.importorskip("torch")
+    from cudf_polars.engine.torch_interop import _chunk_bounds, _dataframe_to_torch
+
+    result = spmd_engine.execute(
+        pl.LazyFrame({"a": [1.0, 2.0, 3.0, 4.0, 5.0]}).select("a")
+    )
+    df = result.take_local(spmd_engine.rank)
+    second = df.slice(_chunk_bounds(df.num_rows, 2, 1))
+    assert _dataframe_to_torch(second, None)["a"].tolist() == [4.0, 5.0]
