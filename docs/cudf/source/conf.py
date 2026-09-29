@@ -480,6 +480,7 @@ intersphinx_mapping = {
         f"https://docs.nvidia.com/rapidsmpf/{intersphinx_version}/",
         None,
     ),
+    "torch": ("https://docs.pytorch.org/docs/stable/", None),
     "typing_extensions": (
         "https://typing-extensions.readthedocs.io/en/stable/",
         None,
