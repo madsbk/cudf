@@ -30,8 +30,8 @@ engine inside a `torch.distributed` job.
 `SPMDEngine` and `torch.distributed` are both SPMD runtimes. Every rank
 runs the same script, owns a rank-local slice of data, and coordinates
 with its peers through collective operations. Running both in one process
-per rank makes several workflows simple that otherwise need separate jobs
-or clusters.
+per rank simplifies workflows that would otherwise need separate jobs or
+clusters.
 
 The snippets below run inside the `with` block from the
 [Quickstart](#quickstart), and `events`, `users` and `catalog` stand for
@@ -231,7 +231,7 @@ with SPMDEngine.from_torch_distributed() as engine:
     )
 
     # 2) Hand off to torch as a zero-copy view of that GPU memory. Clone so
-    #    the tensors outlive the engine.
+    #    the engine's memory can be released.
     tensors = persisted_to_torch(result, engine=engine, ensure_sharded=True)
     feat, label = tensors["feat"].clone(), tensors["label"].clone()
     del tensors

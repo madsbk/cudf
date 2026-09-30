@@ -1,36 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Helpers to interoperate between ``SPMDEngine`` and ``torch.distributed``.
+Hand ``SPMDEngine`` query results to PyTorch.
 
-This module provides:
+* :func:`persisted_to_torch` views this rank's GPU-resident result of
+  :meth:`~cudf_polars.engine.spmd.SPMDEngine.execute` as torch tensors,
+  without copying.
+* :func:`polars_to_tensor` converts a host-side :class:`polars.DataFrame`,
+  such as the output of :meth:`~polars.LazyFrame.collect`.
 
-* :func:`persisted_to_torch` for handing the GPU-resident result of
-  :meth:`~cudf_polars.engine.spmd.SPMDEngine.execute` to torch without a host
-  round-trip. This is the recommended entry point.
-* :func:`polars_to_tensor` for converting a host-side per-rank DataFrame,
-  as returned by :meth:`~polars.LazyFrame.collect`, into tensors.
-
-These return ordinary per-rank :class:`torch.Tensor` objects rather than
-``DTensor``. A query result is split across ranks in counts that follow the
-data, which is not the split ``torch.chunk`` makes, and that split is the only
-one ``DTensor``'s ``Shard(0)`` can describe. Rank-local tensors are also what a
-data-parallel training loop consumes. To slice a replicated result into per-rank
-shards, ``tensor.chunk(world_size)[rank]`` is the whole operation.
-
-``torch`` is imported lazily, so importing this module does not require a
-``torch`` install.
+Both return plain per-rank tensors, not ``DTensor``. ``DTensor``'s ``Shard(0)``
+requires each rank to hold exactly the rows ``torch.chunk`` would give it,
+while the engine decides each rank's row count from the data, for example
+from how a hash partitioning falls.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import functools
+from typing import TYPE_CHECKING
+
+import torch
+
+import pylibcudf as plc
 
 from cudf_polars.unstable import unstable
 
 if TYPE_CHECKING:
-    import torch
-
     import polars as pl
 
     from cudf_polars.containers import Column, DataFrame
@@ -38,51 +34,27 @@ if TYPE_CHECKING:
     from cudf_polars.engine.spmd import SPMDEngine
 
 
-def _torch_dtypes() -> dict[Any, tuple[str, torch.dtype]]:
-    """Map libcudf fixed-width type ids to a ``(numpy typestr, torch dtype)`` pair."""
-    import torch
-
-    import pylibcudf as plc
-
+@functools.cache
+def _torch_dtypes() -> dict[plc.types.TypeId, torch.dtype]:
+    """Map libcudf fixed-width type ids to torch dtypes."""
     tid = plc.types.TypeId
     return {
-        tid.INT8: ("|i1", torch.int8),
-        tid.INT16: ("<i2", torch.int16),
-        tid.INT32: ("<i4", torch.int32),
-        tid.INT64: ("<i8", torch.int64),
-        tid.UINT8: ("|u1", torch.uint8),
-        tid.UINT16: ("<u2", torch.uint16),
-        tid.UINT32: ("<u4", torch.uint32),
-        tid.UINT64: ("<u8", torch.uint64),
-        tid.FLOAT32: ("<f4", torch.float32),
-        tid.FLOAT64: ("<f8", torch.float64),
-        tid.BOOL8: ("|b1", torch.bool),
+        tid.INT8: torch.int8,
+        tid.INT16: torch.int16,
+        tid.INT32: torch.int32,
+        tid.INT64: torch.int64,
+        tid.UINT8: torch.uint8,
+        tid.UINT16: torch.uint16,
+        tid.UINT32: torch.uint32,
+        tid.UINT64: torch.uint64,
+        tid.FLOAT32: torch.float32,
+        tid.FLOAT64: torch.float64,
+        tid.BOOL8: torch.bool,
     }
 
 
-class _DeviceArrayView:
-    """
-    A ``__cuda_array_interface__`` view of a libcudf column's data buffer.
-
-    Holds ``owner`` so the GPU memory outlives every tensor built from it.
-    """
-
-    def __init__(self, ptr: int, size: int, typestr: str, owner: object) -> None:
-        self.__cuda_array_interface__ = {
-            "shape": (size,),
-            "strides": None,
-            "typestr": typestr,
-            "data": (ptr, False),
-            "version": 3,
-        }
-        self._owner = owner
-
-
-def _column_to_tensor(name: str, column: Column, owner: object) -> torch.Tensor:
+def _column_to_tensor(name: str, column: Column) -> torch.Tensor:
     """Zero-copy view of a fixed-width, non-nullable GPU column as a tensor."""
-    import cupy
-    import torch
-
     obj = column.obj
     type_id = obj.type().id()
     mapping = _torch_dtypes()
@@ -98,22 +70,15 @@ def _column_to_tensor(name: str, column: Column, owner: object) -> torch.Tensor:
             "represent. Fill or drop them before the handoff, for example "
             f"with `pl.col({name!r}).fill_null(...)`."
         )
-    typestr, dtype = mapping[type_id]
+    dtype = mapping[type_id]
     buffer = obj.data()
     if buffer is None:  # empty column carries no data buffer
         return torch.empty(0, dtype=dtype, device="cuda")
-    itemsize = torch.empty(0, dtype=dtype).element_size()
-    view = _DeviceArrayView(
-        buffer.ptr + obj.offset() * itemsize,
-        obj.size(),
-        typestr,
-        (buffer, owner),
-    )
-    tensor = torch.as_tensor(cupy.asarray(view))
-    # Anchor the source explicitly rather than relying on the refcount that
-    # cupy/torch happen to keep through the array-interface handoff.
-    tensor._cudf_polars_owner = view
-    return tensor
+    # Fixed-width columns come out of libcudf, which wraps their data this way.
+    assert isinstance(buffer, plc.gpumemoryview)
+    start = obj.offset() * dtype.itemsize
+    data = buffer.byte_slice(slice(start, start + obj.size() * dtype.itemsize))
+    return torch.as_tensor(data, device="cuda").view(dtype)
 
 
 def _dataframe_to_torch(
@@ -128,7 +93,7 @@ def _dataframe_to_torch(
         )
     # The views below carry no stream in their __cuda_array_interface__.
     df.stream.synchronize()
-    return {name: _column_to_tensor(name, df.column_map[name], df) for name in names}
+    return {name: _column_to_tensor(name, df.column_map[name]) for name in names}
 
 
 def _chunk_bounds(nrows: int, nranks: int, rank: int) -> tuple[int, int]:
@@ -164,7 +129,7 @@ def persisted_to_torch(
     This consumes the rank-local partition (see
     :meth:`~cudf_polars.engine.persisted_result.PersistedQueryResult.take_local`),
     so ``result`` cannot also be collected. The returned tensors keep the
-    underlying GPU memory alive.
+    underlying GPU memory alive beyond the lifetime of the engine.
 
     A result is either sharded, each rank holding different rows, or
     replicated, every rank holding the same full copy. Which one a query

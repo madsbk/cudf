@@ -1027,13 +1027,14 @@ def test_persisted_to_torch_roundtrip(spmd_engine: SPMDEngine) -> None:
 def test_persisted_to_torch_shares_gpu_memory(spmd_engine: SPMDEngine) -> None:
     """The tensor is a view of the column, not a copy of it."""
     pytest.importorskip("torch")
-    from cudf_polars.engine.torch_interop import persisted_to_torch
+    from cudf_polars.engine.torch_interop import _dataframe_to_torch
 
     result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0, 3.0]}).select("a"))
-    tensor = persisted_to_torch(result, engine=spmd_engine)["a"]
-    owner = tensor._cudf_polars_owner
-    base = owner.__cuda_array_interface__["data"][0]
-    assert base == tensor.data_ptr()
+    df = result.take_local(spmd_engine.rank)
+    tensor = _dataframe_to_torch(df, None)["a"]
+    data = df.column_map["a"].obj.data()
+    assert data is not None
+    assert tensor.data_ptr() == data.ptr
 
 
 def test_persisted_to_torch_synchronizes_producing_stream(
