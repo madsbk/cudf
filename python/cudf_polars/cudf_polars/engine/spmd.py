@@ -59,6 +59,7 @@ from cudf_polars.engine.hardware_binding import (
     HardwareBindingPolicy,
     bind_to_gpu,
 )
+from cudf_polars.engine.options import StreamingOptions
 from cudf_polars.engine.persisted_result import (
     PersistedBackend,
     execute_persisted_query,
@@ -91,7 +92,6 @@ if TYPE_CHECKING:
 
     from cudf_polars.dsl.ir import IR
     from cudf_polars.engine.core import T
-    from cudf_polars.engine.options import StreamingOptions
     from cudf_polars.engine.persisted_result import PersistedQueryResult
     from cudf_polars.streaming.parallel import ConfigOptions
     from cudf_polars.utils.config import StreamingExecutor
@@ -824,8 +824,6 @@ class SPMDEngine(StreamingEngine):
         """
         import torch.distributed as dist
 
-        from cudf_polars.engine.options import StreamingOptions
-
         if options is None:
             options = StreamingOptions()
         rapidsmpf_options = options.to_rapidsmpf_options()
@@ -838,6 +836,9 @@ class SPMDEngine(StreamingEngine):
                 "dist.init_process_group(...) before "
                 "SPMDEngine.from_torch_distributed()"
             )
+        # The engine's own check runs too late here, after the communicator
+        # below has been set up on this device.
+        _check_engine_gpu_is_first()
 
         rank = dist.get_rank(group)
         world_size = dist.get_world_size(group)

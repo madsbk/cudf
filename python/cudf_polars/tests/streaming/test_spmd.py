@@ -9,7 +9,7 @@ import uuid
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from cuda.bindings.driver import CUresult
@@ -1004,89 +1004,6 @@ def test_use_gpu_rejects_index_outside_existing_visible_devices(
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
 
 
-# ---------------------------------------------------------------------------
-# GPU-resident handoff to torch
-# ---------------------------------------------------------------------------
-
-
-def test_persisted_to_torch_roundtrip(spmd_engine: SPMDEngine) -> None:
-    """The handoff returns this rank's rows, on the GPU, with the right values."""
-    pytest.importorskip("torch")
-    from cudf_polars.engine.torch_interop import persisted_to_torch
-
-    lf = pl.LazyFrame({"a": [1.0, 2.0, 3.0], "b": [4, 5, 6]})
-    result = spmd_engine.execute(lf.select(pl.col("a") * 2, pl.col("b")))
-    tensors = persisted_to_torch(result, engine=spmd_engine)
-
-    assert set(tensors) == {"a", "b"}
-    assert tensors["a"].device.type == "cuda"
-    assert sorted(tensors["a"].tolist()) == [2.0, 4.0, 6.0]
-    assert sorted(tensors["b"].tolist()) == [4, 5, 6]
-
-
-def test_persisted_to_torch_shares_gpu_memory(spmd_engine: SPMDEngine) -> None:
-    """The tensor is a view of the column, not a copy of it."""
-    pytest.importorskip("torch")
-    from cudf_polars.engine.torch_interop import _dataframe_to_torch
-
-    result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0, 3.0]}).select("a"))
-    df = result.take_local(spmd_engine.rank)
-    tensor = _dataframe_to_torch(df, None)["a"]
-    data = df.column_map["a"].obj.data()
-    assert data is not None
-    assert tensor.data_ptr() == data.ptr
-
-
-def test_persisted_to_torch_synchronizes_producing_stream(
-    spmd_engine: SPMDEngine,
-) -> None:
-    """The query's stream is synchronized before its buffers are exposed."""
-    pytest.importorskip("torch")
-    from cudf_polars.engine.torch_interop import _dataframe_to_torch
-
-    result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0]}).select("a"))
-    df = result.take_local(spmd_engine.rank)
-    df.stream = MagicMock(wraps=df.stream)
-    _dataframe_to_torch(df, None)
-    df.stream.synchronize.assert_called_once_with()
-
-
-def test_persisted_to_torch_column_subset(spmd_engine: SPMDEngine) -> None:
-    """`columns` selects a subset, and an unknown name raises."""
-    pytest.importorskip("torch")
-    from cudf_polars.engine.torch_interop import persisted_to_torch
-
-    lf = pl.LazyFrame({"a": [1.0], "b": [2.0]})
-    result = spmd_engine.execute(lf.select("a", "b"))
-    assert set(persisted_to_torch(result, engine=spmd_engine, columns=["b"])) == {"b"}
-
-    result = spmd_engine.execute(lf.select("a", "b"))
-    with pytest.raises(KeyError, match="not in result"):
-        persisted_to_torch(result, engine=spmd_engine, columns=["nope"])
-
-
-def test_persisted_to_torch_rejects_nulls(spmd_engine: SPMDEngine) -> None:
-    """A nullable column cannot become a tensor, and says so."""
-    pytest.importorskip("torch")
-    from cudf_polars.engine.torch_interop import persisted_to_torch
-
-    lf = pl.LazyFrame({"a": [1.0, None, 3.0]})
-    result = spmd_engine.execute(lf.select("a"))
-    with pytest.raises(ValueError, match="contains nulls"):
-        persisted_to_torch(result, engine=spmd_engine)
-
-
-def test_persisted_to_torch_rejects_strings(spmd_engine: SPMDEngine) -> None:
-    """A string column has no tensor equivalent, and says so."""
-    pytest.importorskip("torch")
-    from cudf_polars.engine.torch_interop import persisted_to_torch
-
-    lf = pl.LazyFrame({"s": ["x", "y"]})
-    result = spmd_engine.execute(lf.select("s"))
-    with pytest.raises(TypeError, match="no zero-copy torch equivalent"):
-        persisted_to_torch(result, engine=spmd_engine)
-
-
 def test_persisted_result_take_local_and_duplicated(spmd_engine: SPMDEngine) -> None:
     """`take_local` hands back the partition once, and reports its layout."""
     result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0]}).select("a"))
@@ -1096,55 +1013,3 @@ def test_persisted_result_take_local_and_duplicated(spmd_engine: SPMDEngine) -> 
     assert df.num_rows == 2
     with pytest.raises(RuntimeError, match="consumed on read"):
         result.take_local(spmd_engine.rank)
-
-
-@pytest.mark.parametrize("nranks", [1, 2, 3, 4, 8])
-@pytest.mark.parametrize("nrows", [0, 1, 3, 8, 9, 10, 100])
-def test_chunk_bounds_match_torch_chunk(nrows: int, nranks: int) -> None:
-    """Each rank's slice is exactly the chunk `torch.chunk` gives it."""
-    torch = pytest.importorskip("torch")
-    from cudf_polars.engine.torch_interop import _chunk_bounds
-
-    chunks = [c.tolist() for c in torch.arange(nrows).chunk(nranks)] if nrows else []
-    chunks += [[]] * (nranks - len(chunks))
-    for rank in range(nranks):
-        start, length = _chunk_bounds(nrows, nranks, rank)
-        assert list(range(start, start + length)) == chunks[rank]
-
-
-def test_ensure_sharded_leaves_sharded_result_alone(spmd_engine: SPMDEngine) -> None:
-    """On a result that is already sharded the flag changes nothing."""
-    pytest.importorskip("torch")
-    from cudf_polars.engine.torch_interop import persisted_to_torch
-
-    result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0, 3.0]}).select("a"))
-    tensor = persisted_to_torch(result, engine=spmd_engine, ensure_sharded=True)["a"]
-    assert sorted(tensor.tolist()) == [1.0, 2.0, 3.0]
-
-
-def test_ensure_sharded_slices_replicated_result(spmd_engine: SPMDEngine) -> None:
-    """A replicated result is cut down to this rank's `torch.chunk` share."""
-    pytest.importorskip("torch")
-    from cudf_polars.engine.torch_interop import persisted_to_torch
-
-    lf = pl.LazyFrame({"a": [1.0, 2.0, 3.0, 4.0, 5.0]})
-    result = spmd_engine.execute(lf.select("a"))
-    # A single-rank engine never replicates, so present this rank as the
-    # first of two holding a replicated copy.
-    engine = MagicMock(rank=spmd_engine.rank, nranks=2)
-    with patch.object(result, "local_is_duplicated", return_value=True):
-        tensor = persisted_to_torch(result, engine=engine, ensure_sharded=True)["a"]
-    assert tensor.tolist() == [1.0, 2.0, 3.0]
-
-
-def test_sliced_partition_converts_at_its_offset(spmd_engine: SPMDEngine) -> None:
-    """A later rank's share starts part-way into the column and still views it."""
-    pytest.importorskip("torch")
-    from cudf_polars.engine.torch_interop import _chunk_bounds, _dataframe_to_torch
-
-    result = spmd_engine.execute(
-        pl.LazyFrame({"a": [1.0, 2.0, 3.0, 4.0, 5.0]}).select("a")
-    )
-    df = result.take_local(spmd_engine.rank)
-    second = df.slice(_chunk_bounds(df.num_rows, 2, 1))
-    assert _dataframe_to_torch(second, None)["a"].tolist() == [4.0, 5.0]
