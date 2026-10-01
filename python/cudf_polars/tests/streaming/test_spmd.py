@@ -9,11 +9,11 @@ import uuid
 from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import cuda.core
 import pytest
 from cuda.bindings.driver import CUresult
-from cuda.bindings.runtime import cudaError_t
 
 import polars as pl
 from polars import polars as plrs  # type: ignore[attr-defined]
@@ -898,10 +898,7 @@ def test_memory_error_hint(spmd_engine: SPMDEngine) -> None:
 def test_engine_rejects_gpu_selected_by_ordinal() -> None:
     """A process that selected a GPU by ordinal is rejected when the engine is built."""
     with (
-        patch(
-            "cudf_polars.engine.spmd.cuda_runtime.cudaGetDevice",
-            return_value=(cudaError_t.cudaSuccess, 1),
-        ),
+        patch("cuda.core.Device", return_value=MagicMock(device_id=1)),
         pytest.raises(RuntimeError, match="ordinal 0, but"),
     ):
         SPMDEngine()
@@ -925,17 +922,23 @@ def cuda_not_initialized(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _device_count(status: cudaError_t, count: int | None):
-    return patch(
-        "cudf_polars.engine.spmd.cuda_runtime.cudaGetDeviceCount",
-        return_value=(status, count),
+def _device_count(count: int | None):
+    """Make CUDA report ``count`` visible GPUs, or fail to find any for ``None``."""
+    if count is None:
+        return patch.object(
+            cuda.core.Device,
+            "get_all_devices",
+            side_effect=RuntimeError("CUDA_ERROR_NO_DEVICE"),
+        )
+    return patch.object(
+        cuda.core.Device, "get_all_devices", return_value=[MagicMock()] * count
     )
 
 
 @pytest.mark.usefixtures("cuda_not_initialized")
 def test_use_gpu_sets_visible_devices() -> None:
     """`use_gpu` sets CUDA_VISIBLE_DEVICES and accepts a single visible GPU."""
-    with _device_count(cudaError_t.cudaSuccess, 1):
+    with _device_count(1):
         use_gpu(1)
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
 
@@ -955,7 +958,7 @@ def test_use_gpu_rejects_already_initialized_cuda(
         lambda: (CUresult.CUDA_SUCCESS, None),
     )
     with (
-        _device_count(cudaError_t.cudaSuccess, 1),
+        _device_count(1),
         pytest.raises(RuntimeError, match="already initialized"),
     ):
         use_gpu("GPU-00000000-0000-0000-0000-000000000001")
@@ -966,7 +969,7 @@ def test_use_gpu_rejects_already_initialized_cuda(
 def test_use_gpu_rejects_unknown_gpu() -> None:
     """An index naming no visible GPU is reported as such."""
     with (
-        _device_count(cudaError_t.cudaErrorNoDevice, None),
+        _device_count(None),
         pytest.raises(RuntimeError, match="no GPU matches"),
     ):
         use_gpu(9)
@@ -976,7 +979,7 @@ def test_use_gpu_rejects_unknown_gpu() -> None:
 def test_use_gpu_rejects_several_gpus() -> None:
     """A value that makes more than one GPU visible is not a single selection."""
     with (
-        _device_count(cudaError_t.cudaSuccess, 2),
+        _device_count(2),
         pytest.raises(RuntimeError, match="exactly one"),
     ):
         use_gpu("0,1")
@@ -988,7 +991,7 @@ def test_use_gpu_indexes_existing_visible_devices(
 ) -> None:
     """An index selects from the existing mask, not the physical devices."""
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,0")
-    with _device_count(cudaError_t.cudaSuccess, 1):
+    with _device_count(1):
         use_gpu(1)
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
 

@@ -131,7 +131,7 @@ files:
       - depends_on_cudf_kafka
       - depends_on_custreamz
       - depends_on_cudf_polars
-      - depends_on_pytorch
+      - depends_on_pytorch_cuda
       - depends_on_ray
       - depends_on_cudf_streaming
   build_cudf_polars_quent:
@@ -1798,6 +1798,16 @@ dependencies:
               cuda: "13.*"
             packages:
               - pytorch>=2.10.0
+          - matrix:
+            packages:
+  depends_on_pytorch_cuda:
+    specific:
+      - output_types: conda
+        matrices:
+          - matrix:
+              cuda: "13.*"
+            packages:
+              - pytorch>=2.10.0=cuda*
           - matrix:
             packages:
   depends_on_rapids_logger:

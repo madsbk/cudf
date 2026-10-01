@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
-from cuda.bindings.runtime import cudaError_t
 
 import polars as pl
 
@@ -102,10 +101,7 @@ def test_from_torch_distributed_builds_engine_from_options() -> None:
 def test_from_torch_distributed_checks_gpu_before_bootstrap() -> None:
     """A GPU selected by ordinal is rejected before any communicator is created."""
     with (
-        patch(
-            "cudf_polars.engine.spmd.cuda_runtime.cudaGetDevice",
-            return_value=(cudaError_t.cudaSuccess, 1),
-        ),
+        patch("cuda.core.Device", return_value=MagicMock(device_id=1)),
         patch("cudf_polars.engine.spmd.new_communicator") as new_communicator,
         pytest.raises(RuntimeError, match="ordinal 0, but"),
     ):

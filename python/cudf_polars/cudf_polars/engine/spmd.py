@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, cast
 
 import cuda.bindings.driver as cuda_driver
-import cuda.bindings.runtime as cuda_runtime
+import cuda.core
 import kvikio
 import kvikio.defaults
 import ucxx._lib.libucxx as ucx_api
@@ -168,13 +168,13 @@ def use_gpu(index: int | str) -> None:
 
     os.environ["CUDA_VISIBLE_DEVICES"] = selected
     # This initializes CUDA, fixing the visible devices to the one just set.
-    status, count = cuda_runtime.cudaGetDeviceCount()
-    if status != cuda_runtime.cudaError_t.cudaSuccess:
+    try:
+        count = len(cuda.core.Device.get_all_devices())
+    except Exception as e:
         raise RuntimeError(
-            f"no GPU matches CUDA_VISIBLE_DEVICES={selected!r} ({status.name}). "
-            "Pass an index into the devices visible before this call, or a GPU "
-            "UUID."
-        )
+            f"no GPU matches CUDA_VISIBLE_DEVICES={selected!r}. Pass an index "
+            "into the devices visible before this call, or a GPU UUID."
+        ) from e
     if count != 1:
         raise RuntimeError(
             f"CUDA_VISIBLE_DEVICES={selected!r} makes {count} GPUs visible, "
@@ -200,9 +200,7 @@ def _check_engine_gpu_is_first() -> None:
     RuntimeError
         If the current CUDA device is not ordinal 0.
     """
-    status, device = cuda_runtime.cudaGetDevice()
-    if status != cuda_runtime.cudaError_t.cudaSuccess:
-        raise RuntimeError(f"could not query the current CUDA device: {status.name}")
+    device = cuda.core.Device().device_id
     if device != 0:
         raise RuntimeError(
             "cudf-polars streaming engines run on CUDA device ordinal 0, but "
