@@ -23,8 +23,7 @@ available to the process.
 `rrun` assigns a GPU to each rank, as do the Dask and Ray frontends for their workers, so
 this is usually taken care of. A launcher that does not, `torchrun` being the common case,
 leaves it to the script, which can call {func}`~cudf_polars.engine.spmd.use_gpu` before its
-first CUDA call. `python/cudf_polars/docs/cudf-polars-pytorch.md` in the repository covers
-that setup.
+first CUDA call. {doc}`pytorch` covers that setup.
 
 The requirement exists because the engine runs its actors on threads created by rapidsmpf,
 and the current CUDA device is per-thread: a new thread always starts on ordinal 0 whatever
