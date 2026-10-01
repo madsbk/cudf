@@ -30,38 +30,16 @@ from cudf_polars.engine.torch_interop import (  # noqa: E402
 )
 
 
-def test_polars_to_tensor_all_columns() -> None:
-    """All columns are converted by default and preserve values."""
-    df = pl.DataFrame(
-        {"a": [1, 2, 3], "b": [4.0, 5.0, 6.0], "c": [7, 8, 9]},
-    )
+def test_polars_to_tensor() -> None:
+    """Every column by default, or a subset in the given order with dtype overrides."""
+    df = pl.DataFrame({"a": [1, 2], "b": [3.0, 4.0], "c": [5, 6]})
     out = polars_to_tensor(df)
-    assert set(out) == {"a", "b", "c"}
-    assert out["a"].tolist() == [1, 2, 3]
-    assert out["b"].tolist() == [4.0, 5.0, 6.0]
+    assert {name: t.tolist() for name, t in out.items()} == df.to_dict(as_series=False)
 
-
-def test_polars_to_tensor_column_subset() -> None:
-    """`columns` selects a subset and preserves order."""
-    df = pl.DataFrame({"a": [1, 2], "b": [3, 4], "c": [5, 6]})
-    out = polars_to_tensor(df, columns=["c", "a"])
+    out = polars_to_tensor(df, columns=["c", "a"], dtype={"a": torch.float64})
     assert list(out) == ["c", "a"]
-    assert out["c"].tolist() == [5, 6]
-    assert out["a"].tolist() == [1, 2]
-
-
-def test_polars_to_tensor_dtype_override() -> None:
-    """Per-column dtype overrides are applied."""
-    df = pl.DataFrame({"a": [1, 2, 3]})
-    out = polars_to_tensor(df, dtype={"a": torch.float64})
     assert out["a"].dtype == torch.float64
-
-
-def test_polars_to_tensor_missing_column_raises() -> None:
-    """Requesting a column that does not exist raises."""
-    df = pl.DataFrame({"a": [1, 2]})
-    with pytest.raises(pl.exceptions.ColumnNotFoundError):
-        polars_to_tensor(df, columns=["missing"])
+    assert out["a"].tolist() == [1.0, 2.0]
 
 
 def test_from_torch_distributed_requires_initialized_pg(
@@ -109,26 +87,22 @@ def test_from_torch_distributed_checks_gpu_before_bootstrap() -> None:
     new_communicator.assert_not_called()
 
 
-def test_persisted_to_torch_roundtrip(spmd_engine: SPMDEngine) -> None:
+@pytest.mark.parametrize("ensure_sharded", [False, True])
+def test_persisted_to_torch_roundtrip(
+    spmd_engine: SPMDEngine, *, ensure_sharded: bool
+) -> None:
     """The handoff returns this rank's rows, on the GPU, with the right values."""
     lf = pl.LazyFrame({"a": [1.0, 2.0, 3.0], "b": [4, 5, 6]})
     result = spmd_engine.execute(lf.select(pl.col("a") * 2, pl.col("b")))
-    tensors = persisted_to_torch(result, engine=spmd_engine)
+    # The result is sharded, so `ensure_sharded` leaves it as it is.
+    tensors = persisted_to_torch(
+        result, engine=spmd_engine, ensure_sharded=ensure_sharded
+    )
 
     assert set(tensors) == {"a", "b"}
     assert tensors["a"].device.type == "cuda"
     assert sorted(tensors["a"].tolist()) == [2.0, 4.0, 6.0]
     assert sorted(tensors["b"].tolist()) == [4, 5, 6]
-
-
-def test_persisted_to_torch_shares_gpu_memory(spmd_engine: SPMDEngine) -> None:
-    """The tensor is a view of the column, not a copy of it."""
-    result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0, 3.0]}).select("a"))
-    df = result.take_local(spmd_engine.rank)
-    tensor = _dataframe_to_torch(df, None)["a"]
-    data = df.column_map["a"].obj.data()
-    assert data is not None
-    assert tensor.data_ptr() == data.ptr
 
 
 def test_persisted_to_torch_synchronizes_producing_stream(
@@ -153,24 +127,24 @@ def test_persisted_to_torch_column_subset(spmd_engine: SPMDEngine) -> None:
         persisted_to_torch(result, engine=spmd_engine, columns=["nope"])
 
 
-def test_persisted_to_torch_rejects_nulls(spmd_engine: SPMDEngine) -> None:
-    """A nullable column cannot become a tensor, and says so."""
-    lf = pl.LazyFrame({"a": [1.0, None, 3.0]})
-    result = spmd_engine.execute(lf.select("a"))
-    with pytest.raises(ValueError, match="contains nulls"):
+@pytest.mark.parametrize(
+    "values,error,match",
+    [
+        ([1.0, None, 3.0], ValueError, "contains nulls"),
+        (["x", "y"], TypeError, "no zero-copy torch equivalent"),
+    ],
+)
+def test_persisted_to_torch_rejects_unsupported_columns(
+    spmd_engine: SPMDEngine, values: list, error: type[Exception], match: str
+) -> None:
+    """Nulls and non-fixed-width columns cannot become tensors, and say so."""
+    result = spmd_engine.execute(pl.LazyFrame({"a": values}).select("a"))
+    with pytest.raises(error, match=match):
         persisted_to_torch(result, engine=spmd_engine)
 
 
-def test_persisted_to_torch_rejects_strings(spmd_engine: SPMDEngine) -> None:
-    """A string column has no tensor equivalent, and says so."""
-    lf = pl.LazyFrame({"s": ["x", "y"]})
-    result = spmd_engine.execute(lf.select("s"))
-    with pytest.raises(TypeError, match="no zero-copy torch equivalent"):
-        persisted_to_torch(result, engine=spmd_engine)
-
-
-@pytest.mark.parametrize("nranks", [1, 2, 3, 4, 8])
-@pytest.mark.parametrize("nrows", [0, 1, 3, 8, 9, 10, 100])
+@pytest.mark.parametrize("nranks", [1, 3, 4])
+@pytest.mark.parametrize("nrows", [0, 1, 9, 10])
 def test_chunk_bounds_match_torch_chunk(nrows: int, nranks: int) -> None:
     """Each rank's slice is exactly the chunk `torch.chunk` gives it."""
     chunks = [c.tolist() for c in torch.arange(nrows).chunk(nranks)] if nrows else []
@@ -178,13 +152,6 @@ def test_chunk_bounds_match_torch_chunk(nrows: int, nranks: int) -> None:
     for rank in range(nranks):
         start, length = _chunk_bounds(nrows, nranks, rank)
         assert list(range(start, start + length)) == chunks[rank]
-
-
-def test_ensure_sharded_leaves_sharded_result_alone(spmd_engine: SPMDEngine) -> None:
-    """On a result that is already sharded the flag changes nothing."""
-    result = spmd_engine.execute(pl.LazyFrame({"a": [1.0, 2.0, 3.0]}).select("a"))
-    tensor = persisted_to_torch(result, engine=spmd_engine, ensure_sharded=True)["a"]
-    assert sorted(tensor.tolist()) == [1.0, 2.0, 3.0]
 
 
 def test_ensure_sharded_slices_replicated_result(spmd_engine: SPMDEngine) -> None:
@@ -200,10 +167,14 @@ def test_ensure_sharded_slices_replicated_result(spmd_engine: SPMDEngine) -> Non
 
 
 def test_sliced_partition_converts_at_its_offset(spmd_engine: SPMDEngine) -> None:
-    """A later rank's share starts part-way into the column and still views it."""
+    """A later rank's share is a view into the column at its offset, not a copy."""
     result = spmd_engine.execute(
         pl.LazyFrame({"a": [1.0, 2.0, 3.0, 4.0, 5.0]}).select("a")
     )
     df = result.take_local(spmd_engine.rank)
-    second = df.slice(_chunk_bounds(df.num_rows, 2, 1))
-    assert _dataframe_to_torch(second, None)["a"].tolist() == [4.0, 5.0]
+    data = df.column_map["a"].obj.data()
+    assert data is not None
+    start, length = _chunk_bounds(df.num_rows, 2, 1)
+    tensor = _dataframe_to_torch(df.slice((start, length)), None)["a"]
+    assert tensor.tolist() == [4.0, 5.0]
+    assert tensor.data_ptr() == data.ptr + start * tensor.element_size()

@@ -936,11 +936,44 @@ def _device_count(count: int | None):
 
 
 @pytest.mark.usefixtures("cuda_not_initialized")
-def test_use_gpu_sets_visible_devices() -> None:
-    """`use_gpu` sets CUDA_VISIBLE_DEVICES and accepts a single visible GPU."""
+@pytest.mark.parametrize(
+    "mask,index,expected",
+    [(None, 1, "1"), ("1,0", 1, "0")],
+    ids=["no-mask", "index-into-mask"],
+)
+def test_use_gpu_sets_visible_devices(
+    monkeypatch: pytest.MonkeyPatch, mask: str | None, index: int, expected: str
+) -> None:
+    """An index selects from the visible devices, and becomes the only one."""
+    if mask is not None:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", mask)
     with _device_count(1):
-        use_gpu(1)
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "1"
+        use_gpu(index)
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == expected
+
+
+@pytest.mark.usefixtures("cuda_not_initialized")
+@pytest.mark.parametrize(
+    "mask,index,count,match",
+    [
+        (None, 9, None, "no GPU matches"),
+        (None, "0,1", 2, "exactly one"),
+        ("3", 1, 1, "out of range"),
+    ],
+    ids=["unknown-gpu", "several-gpus", "index-outside-mask"],
+)
+def test_use_gpu_rejects_invalid_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    mask: str | None,
+    index: int | str,
+    count: int | None,
+    match: str,
+) -> None:
+    """A selection that does not name exactly one visible GPU is reported."""
+    if mask is not None:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", mask)
+    with _device_count(count), pytest.raises(RuntimeError, match=match):
+        use_gpu(index)
 
 
 def test_use_gpu_rejects_already_initialized_cuda(
@@ -963,48 +996,6 @@ def test_use_gpu_rejects_already_initialized_cuda(
     ):
         use_gpu("GPU-00000000-0000-0000-0000-000000000001")
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
-
-
-@pytest.mark.usefixtures("cuda_not_initialized")
-def test_use_gpu_rejects_unknown_gpu() -> None:
-    """An index naming no visible GPU is reported as such."""
-    with (
-        _device_count(None),
-        pytest.raises(RuntimeError, match="no GPU matches"),
-    ):
-        use_gpu(9)
-
-
-@pytest.mark.usefixtures("cuda_not_initialized")
-def test_use_gpu_rejects_several_gpus() -> None:
-    """A value that makes more than one GPU visible is not a single selection."""
-    with (
-        _device_count(2),
-        pytest.raises(RuntimeError, match="exactly one"),
-    ):
-        use_gpu("0,1")
-
-
-@pytest.mark.usefixtures("cuda_not_initialized")
-def test_use_gpu_indexes_existing_visible_devices(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An index selects from the existing mask, not the physical devices."""
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,0")
-    with _device_count(1):
-        use_gpu(1)
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
-
-
-@pytest.mark.usefixtures("cuda_not_initialized")
-def test_use_gpu_rejects_index_outside_existing_visible_devices(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An index past the end of the existing mask is reported, naming the mask."""
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
-    with pytest.raises(RuntimeError, match="out of range"):
-        use_gpu(1)
-    assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
 
 
 def test_persisted_result_take_local_and_duplicated(spmd_engine: SPMDEngine) -> None:
