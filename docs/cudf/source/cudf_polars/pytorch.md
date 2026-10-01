@@ -40,8 +40,14 @@ with SPMDEngine.from_torch_distributed() as engine:
     feat, label = tensors["feat"].clone(), tensors["label"].clone()
     del tensors
 
-model = DDP(MyModel().cuda(), device_ids=[0])
-train(model, feat, label)
+# Train as usual. Every rank holds its own rows, and DDP averages the gradients.
+model = DDP(torch.nn.Linear(1, 1).cuda(), device_ids=[0])
+optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+x, y = feat.unsqueeze(1), label.unsqueeze(1)
+for _ in range(100):
+    optimizer.zero_grad()
+    torch.nn.functional.mse_loss(model(x), y).backward()
+    optimizer.step()
 
 dist.destroy_process_group()
 ```
@@ -93,8 +99,9 @@ and `device_ids=[0]` for `DistributedDataParallel`.
 
 ## Use cases
 
-The snippets below run inside the `with` block from the quickstart, and `events`, `users`
-and `catalog` stand for `pl.scan_parquet(...)` inputs.
+The snippets below run inside the `with` block from the quickstart. `events`, `users` and
+`catalog` stand for `pl.scan_parquet(...)` inputs, and names such as `train` and
+`send_for_labeling` stand for application code.
 
 ### Collapse two-cluster ETL-to-training pipelines into one
 
@@ -167,7 +174,8 @@ for _ in range(num_rounds):
     )
     with torch.no_grad():
         p = model(pool["feat"].unsqueeze(1)).sigmoid().squeeze(1)
-    # Pick the globally most uncertain rows. Every rank gets the same answer.
+    # `scores` is this rank's share. The engine sorts across all ranks, so every rank
+    # gets the same, globally most uncertain rows.
     scores = pl.LazyFrame({
         "id": pool["id"].cpu().numpy(),
         "margin": (p - 0.5).abs().cpu().numpy(),
