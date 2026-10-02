@@ -959,8 +959,9 @@ def test_use_gpu_sets_visible_devices(
         (None, 9, None, "no GPU matches"),
         (None, "0,1", 2, "exactly one"),
         ("3", 1, 1, "out of range"),
+        ("", 0, 1, "out of range"),
     ],
-    ids=["unknown-gpu", "several-gpus", "index-outside-mask"],
+    ids=["unknown-gpu", "several-gpus", "index-outside-mask", "empty-mask"],
 )
 def test_use_gpu_rejects_invalid_selection(
     monkeypatch: pytest.MonkeyPatch,

@@ -151,7 +151,7 @@ def use_gpu(index: int | str) -> None:
         )
 
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if visible and isinstance(index, int):
+    if visible is not None and isinstance(index, int):
         # An index means "into the devices visible now", which is not the same
         # as the physical device index once something has already restricted
         # them. A scheduler that allocated GPUs 3 and 5 leaves
