@@ -84,6 +84,8 @@ and `device_ids=[0]` for `DistributedDataParallel`.
   {class}`~cudf_polars.engine.spmd.SPMDEngine` instead.
 - All ranks must issue the same queries in the same order, as for any
   {class}`~cudf_polars.engine.spmd.SPMDEngine` use.
+- Each rank's share of the result must fit in its GPU memory, see
+  {ref}`cudf-polars-pytorch-larger-results`.
 - The tensors returned by `persisted_to_torch` keep the engine's GPU memory alive.
   `.clone()` the ones you keep and drop the views.
 - `engine.rank` need not equal `dist.get_rank()`. Each rank reads its own data either way,
@@ -156,6 +158,27 @@ train_table = (
     .select(pl.col("age", "price", "label").cast(pl.Float32))
 )
 tensors = persisted_to_torch(engine.execute(train_table), engine=engine, ensure_sharded=True)
+```
+
+(cudf-polars-pytorch-larger-results)=
+### Results larger than GPU memory
+
+The query itself can be larger than GPU memory, but the result handed to torch has to fit.
+For a larger result, split the input into batches whose results fit and run one query per
+batch. Hashing a key works for any data. A filter that skips whole files or row groups, such
+as one on a date column, avoids reading all of the input for every batch.
+
+```python
+nbatches = 16
+for i in range(nbatches):
+    batch = engine.execute(
+        events.filter(pl.col("event_id").hash(seed=0) % nbatches == i)
+        .select(pl.col("amount", "label").cast(pl.Float32))
+    )
+    tensors = persisted_to_torch(batch, engine=engine, ensure_sharded=True)
+    amount, label = tensors["amount"].clone(), tensors["label"].clone()
+    del tensors
+    train(model, amount, label)
 ```
 
 ### Active learning
