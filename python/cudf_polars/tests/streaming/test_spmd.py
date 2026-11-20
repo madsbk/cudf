@@ -230,6 +230,21 @@ def test_mr_restored_after_context(comm: Communicator) -> None:
     assert rmm.mr.get_current_device_resource() is original
 
 
+def test_collect_keeps_current_device_resource(comm: Communicator) -> None:
+    """A collect does not set the current device resource, also after a reset."""
+    with SPMDEngine(comm=comm) as engine:
+        for reset in (False, True):
+            if reset:
+                engine._reset(executor_options={"max_rows_per_partition": 7})
+            with patch(
+                "rmm.mr.set_current_device_resource",
+                wraps=rmm.mr.set_current_device_resource,
+            ) as set_current:
+                result = pl.LazyFrame({"a": [1, 2, 3]}).collect(engine=engine)
+            assert sorted(result["a"].to_list()) == [1, 2, 3]
+            assert set_current.call_count == 0
+
+
 def test_allgather_polars_dataframe_multi_column(spmd_engine: SPMDEngine) -> None:
     """allgather preserves column names, count, and dtypes for multi-column DataFrames."""
     local = pl.DataFrame(

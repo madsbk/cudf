@@ -189,6 +189,12 @@ def set_memory_resource(
             memory_resource_config=memory_resource_config,
         )
 
+    if mr is previous:
+        # Setting the current resource invalidates every resource reference that
+        # was obtained from it, including those of queries running in other
+        # threads, so leave it alone when it is already the one we need.
+        yield mr
+        return
     rmm.mr.set_current_device_resource(mr)
     try:
         yield mr

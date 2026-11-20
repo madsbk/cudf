@@ -737,7 +737,7 @@ class SPMDEngine(StreamingEngine):
                 },
                 engine_options={
                     **engine_options,
-                    "memory_resource": self._ctx.br().device_mr,
+                    "memory_resource": self._mr,
                 },
                 exit_stack=exit_stack,
             )
@@ -1147,7 +1147,7 @@ class SPMDEngine(StreamingEngine):
             },
             engine_options={
                 **engine_options,
-                "memory_resource": self._ctx.br().device_mr,
+                "memory_resource": self._mr,
             },
             exit_stack=self._exit_stack,
         )
