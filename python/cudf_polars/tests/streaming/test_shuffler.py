@@ -8,7 +8,9 @@ import asyncio
 import pytest
 
 import polars as pl
+from polars.testing import assert_frame_equal
 
+import pylibcudf as plc
 from cudf_streaming.channel_metadata import (
     ChannelMetadata,
     HashScheme,
@@ -17,12 +19,15 @@ from cudf_streaming.channel_metadata import (
 from cudf_streaming.table_chunk import TableChunk
 
 from cudf_polars.containers import DataFrame, DataType
+from cudf_polars.dsl import expr
 from cudf_polars.engine.options import StreamingOptions
 from cudf_polars.engine.spmd import allgather_polars_dataframe
+from cudf_polars.streaming.actor_graph.collectives import shuffle as shuffle_module
 from cudf_polars.streaming.actor_graph.collectives.common import reserve_op_id
 from cudf_polars.streaming.actor_graph.collectives.shuffle import (
     LocalRepartitioner,
     ShuffleManager,
+    _batch_end,
 )
 from cudf_polars.streaming.actor_graph.utils import (
     _is_already_partitioned,
@@ -300,3 +305,108 @@ def test_local_repartitioner_index(spmd_engine, local_count) -> None:
             engine=spmd_engine, local_df=local_df, op_id=op_id
         )
     assert global_df.height == 12 * comm.nranks
+
+
+@pytest.mark.parametrize(
+    "offsets,begin,max_rows,expected",
+    [
+        pytest.param([0, 2, 4, 6, 8], 0, 4, 2, id="fits"),
+        pytest.param([0, 2, 4, 6, 8], 2, 8, 4, id="rest"),
+        pytest.param([0, 1, 9, 10, 11], 1, 3, 2, id="large"),
+        pytest.param([0, 0, 0, 0], 0, 1, 3, id="empty"),
+        pytest.param([0, 5], 0, 1, 1, id="one-partition"),
+    ],
+)
+def test_batch_end(offsets, begin, max_rows, expected) -> None:
+    assert _batch_end(offsets, begin, max_rows) == expected
+
+
+@pytest.mark.spmd
+@pytest.mark.parametrize("insert", ["hash", "hash_keys"])
+@pytest.mark.parametrize(
+    "available,min_batch_nbytes,batched",
+    [
+        pytest.param(2**62, 1, False, id="whole"),
+        pytest.param(0, 1, True, id="one-partition-batches"),
+        pytest.param(0, 512, True, id="min-batches"),
+        pytest.param(2048, 1, True, id="available-batches"),
+    ],
+)
+def test_insert_hash_batches(
+    spmd_engine, monkeypatch, insert, available, min_batch_nbytes, batched
+) -> None:
+    # Reordering the whole chunk, or gathering and packing it in batches of
+    # partitions, gives each partition the rows `cudf::hash_partition` gives it.
+    monkeypatch.setattr(
+        shuffle_module, "_device_memory_available", lambda br: available
+    )
+    monkeypatch.setattr(shuffle_module, "_MIN_PACK_BATCH_NBYTES", min_batch_nbytes)
+    gather_and_insert = ShuffleManager.Inserter._gather_and_insert
+    num_gather_and_insert = 0
+
+    async def spy(*args, **kwargs):
+        nonlocal num_gather_and_insert
+        num_gather_and_insert += 1
+        return await gather_and_insert(*args, **kwargs)
+
+    monkeypatch.setattr(ShuffleManager.Inserter, "_gather_and_insert", spy)
+    context = spmd_engine.context
+    comm = spmd_engine.comm
+    num_partitions = 2 * comm.nranks + 3
+
+    pl_df = pl.DataFrame(
+        {
+            "key": [i % 37 for i in range(300)],
+            "val": list(range(300)),
+            "s": [str(i) * (i % 5) for i in range(300)],
+        }
+    )
+    col_names = pl_df.columns
+    dtypes = [DataType(dt) for dt in pl_df.dtypes]
+    schema = dict(zip(col_names, dtypes, strict=True))
+
+    results: dict[int, pl.DataFrame] = {}
+    expected: dict[int, pl.DataFrame] = {}
+
+    async def _run() -> None:
+        stream = context.br().stream_pool.get_stream()
+        cudf_df = DataFrame.from_polars(pl_df, stream)
+        reordered, offsets = plc.partitioning.hash_partition(
+            cudf_df.table, [0], num_partitions, stream=stream
+        )
+        for pid, part in enumerate(
+            plc.copying.split(reordered, offsets[1:-1], stream=stream)
+        ):
+            expected[pid] = DataFrame.from_table(
+                part, col_names, dtypes, stream
+            ).to_polars()
+        with reserve_op_id() as op_id:
+            shuffle = ShuffleManager(
+                context, comm, num_partitions=num_partitions, collective_id=op_id
+            )
+            async with shuffle.inserting() as inserter:
+                chunk = TableChunk.from_pylibcudf_table(
+                    cudf_df.table, stream, exclusive_view=True, br=context.br()
+                )
+                if insert == "hash":
+                    await inserter.insert_hash(chunk, columns_to_hash=(0,))
+                else:
+                    await inserter.insert_hash_keys(
+                        chunk,
+                        (expr.NamedExpr("key", expr.Col(dtypes[0], "key")),),
+                        schema,
+                    )
+            for pid in shuffle.local_partitions():
+                tbl = await shuffle.extract_chunk(pid, stream)
+                results[pid] = DataFrame.from_table(
+                    tbl, col_names, dtypes, stream
+                ).to_polars()
+
+    asyncio.run(_run())
+
+    assert num_gather_and_insert == int(batched)
+    assert results
+    for pid, df in results.items():
+        # Every rank inserts the same rows.
+        expect = pl.concat([expected[pid]] * comm.nranks)
+        assert_frame_equal(df, expect, check_row_order=False)

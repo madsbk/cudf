@@ -14,7 +14,6 @@ from cudf_streaming.channel_metadata import (
     Partitioning,
 )
 from cudf_streaming.partition_utils import (
-    partition_and_pack as py_partition_and_pack,
     partition_and_pack_cost as py_partition_and_pack_cost,
     split_and_pack as py_split_and_pack,
     split_and_pack_cost as py_split_and_pack_cost,
@@ -27,6 +26,7 @@ from cudf_streaming.table_chunk import (
 )
 from rapidsmpf.communicator.single import new_communicator as single_comm
 from rapidsmpf.config import Options, get_environment_variables
+from rapidsmpf.memory.buffer import MemoryType
 from rapidsmpf.memory.memory_reservation import opaque_memory_usage
 from rapidsmpf.shuffler import PartitionAssignment
 from rapidsmpf.streaming.coll.shuffler import ShufflerAsync
@@ -53,9 +53,10 @@ from cudf_polars.streaming.shuffle import Shuffle
 from cudf_polars.utils.cuda_stream import stream_ordered_after
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from rapidsmpf.communicator.communicator import Communicator
+    from rapidsmpf.memory.buffer_resource import BufferResource
     from rapidsmpf.memory.packed_data import PackedData
     from rapidsmpf.streaming.core.channel import Channel
     from rmm.pylibrmm.stream import Stream
@@ -106,63 +107,199 @@ class ShuffleManager:
             self, chunk: TableChunk, columns_to_hash: tuple[int, ...]
         ) -> None:
             """Partition chunk by hash and insert into the shuffler."""
-            br = self._manager.context.br()
-            reservation = await reserve_memory(
-                self._manager.context,
-                py_partition_and_pack_cost(chunk.table_view(), chunk.stream, br),
-                # The chunk's data moves into shuffler-owned packed buffers,
-                # nothing lasting is added.
-                net_memory_delta=0,
-            )
-            self._manager.shuffler.insert(
-                py_partition_and_pack(
-                    table=chunk.table_view(),
-                    columns_to_hash=columns_to_hash,
-                    num_partitions=self._manager.num_partitions,
-                    stream=chunk.stream,
-                    br=br,
-                    reservation=reservation,
-                )
+            columns = chunk.table_view().columns()
+            await self._insert_hashed(
+                chunk,
+                lambda: plc.Table([columns[i] for i in columns_to_hash]),
+                keys_allocate=False,
             )
 
         async def insert_hash_keys(
             self, chunk: TableChunk, keys: tuple[NamedExpr, ...], schema: Schema
         ) -> None:
             """Partition chunk by hash of ``keys`` evaluated over it, and insert."""
-            br = self._manager.context.br()
-            # Three allocations of the chunk's packed size: the key table, the
-            # reorder, then the pack.
-            #
-            # Charging the key table a whole chunk is an approximation, not a
-            # bound. A key expression that expands its input evaluates to more
-            # than the chunk's packed size and under-reserves.
-            chunk_nbytes = py_split_and_pack_cost(chunk.table_view(), chunk.stream, br)
+            await self._insert_hashed(
+                chunk,
+                lambda: _evaluate_key_table(chunk, keys, schema),
+                keys_allocate=True,
+            )
+
+        async def _insert_hashed(
+            self,
+            chunk: TableChunk,
+            make_keys: Callable[[], plc.Table],
+            *,
+            keys_allocate: bool,
+        ) -> None:
+            """
+            Partition ``chunk`` by the hash of the keys ``make_keys`` returns, and insert.
+
+            If the device memory available for reservation covers reordering
+            the whole chunk at once, the chunk is reordered with
+            ``hash_partition`` and packed. Otherwise only a gather map is
+            computed, and the chunk is gathered, packed and inserted in batches
+            of partitions sized to the available memory.
+
+            Parameters
+            ----------
+            chunk
+                The chunk to partition.
+            make_keys
+                Returns the table of keys to hash, row-aligned with ``chunk``.
+            keys_allocate
+                Whether ``make_keys`` allocates a new table, charged as one
+                chunk. This is an approximation, not a bound. A key expression
+                that expands its input evaluates to more than the chunk's
+                packed size and under-reserves.
+            """
+            context = self._manager.context
+            br = context.br()
+            table = chunk.table_view()
+            stream = chunk.stream
+            chunk_nbytes = py_split_and_pack_cost(table, stream, br)
+            keys_nbytes = chunk_nbytes if keys_allocate else 0
+            # The keys, the reorder and the pack.
+            whole_nbytes = keys_nbytes + 2 * chunk_nbytes
+            if _device_memory_available(br) >= whole_nbytes:
+                reservation = await reserve_memory(
+                    context,
+                    whole_nbytes,
+                    # The chunk's data moves into shuffler-owned packed buffers,
+                    # nothing lasting is added.
+                    net_memory_delta=0,
+                )
+                with opaque_memory_usage(reservation.split(keys_nbytes)):
+                    keys = make_keys()
+                with opaque_memory_usage(reservation.split(chunk_nbytes)):
+                    reordered, offsets = plc.partitioning.hash_partition(
+                        table,
+                        keys,
+                        self._manager.num_partitions,
+                        stream=stream,
+                        mr=br.device_mr,
+                    )
+                del keys
+                self._manager.shuffler.insert(
+                    py_split_and_pack(
+                        table=reordered,
+                        splits=list(offsets[1:-1]),
+                        stream=stream,
+                        br=br,
+                        reservation=reservation,
+                    )
+                )
+                return
+
             reservation = await reserve_memory(
-                self._manager.context,
-                3 * chunk_nbytes,
-                # The chunk's data moves into shuffler-owned packed buffers,
-                # nothing lasting is added.
+                context,
+                keys_nbytes + _hash_partition_indices_cost(table.num_rows()),
                 net_memory_delta=0,
             )
-            with opaque_memory_usage(reservation.split(chunk_nbytes)):
-                key_table = _evaluate_key_table(chunk, keys, schema)
-            with opaque_memory_usage(reservation.split(chunk_nbytes)):
-                partitioned_table, offsets = plc.partitioning.hash_partition(
-                    chunk.table_view(),
-                    key_table,
-                    self._manager.num_partitions,
-                    stream=chunk.stream,
-                    mr=br.device_mr,
+            with opaque_memory_usage(reservation.split(keys_nbytes)):
+                keys = make_keys()
+            with opaque_memory_usage(reservation):
+                gather_map, offsets = self._hash_partition_indices(keys, stream)
+            # Free the keys before any of the chunk is copied.
+            del keys
+            await self._gather_and_insert(
+                table, gather_map, offsets, chunk_nbytes, stream
+            )
+
+        def _hash_partition_indices(
+            self, keys: plc.Table, stream: Stream
+        ) -> tuple[plc.Column, list[int]]:
+            """Hash ``keys`` into a gather map grouped by partition and its offsets."""
+            return plc.partitioning.hash_partition_indices(
+                keys,
+                self._manager.num_partitions,
+                # `cudf::hash_partition` doesn't keep the input order either.
+                plc.partitioning.PartitionOrder.UNSTABLE,
+                stream=stream,
+                mr=self._manager.context.br().device_mr,
+            )
+
+        async def _gather_and_insert(
+            self,
+            table: plc.Table,
+            gather_map: plc.Column,
+            offsets: list[int],
+            table_nbytes: int,
+            stream: Stream,
+        ) -> None:
+            """
+            Gather, pack and insert ``table`` in batches of consecutive partitions.
+
+            Each batch is sized, by an estimate from its row count, so that its
+            gather and its pack fit in half each of the device memory available
+            for reservation when the batch starts, but at least
+            ``_MIN_PACK_BATCH_NBYTES``. A partition larger than that is a batch
+            of its own. A batch is inserted into the shuffler before the next
+            one is gathered, and each batch reserves its own memory.
+
+            Parameters
+            ----------
+            table
+                The table to partition.
+            gather_map
+                Row indices of ``table`` grouped by partition.
+            offsets
+                ``num_partitions + 1`` offsets into ``gather_map``, where partition
+                ``i`` is ``gather_map[offsets[i]:offsets[i + 1]]``.
+            table_nbytes
+                The packed size of ``table``.
+            stream
+                CUDA stream that ``table`` and ``gather_map`` are ordered on.
+            """
+            context = self._manager.context
+            br = context.br()
+            num_rows = table.num_rows()
+            num_partitions = len(offsets) - 1
+            begin = 0
+            while begin < num_partitions:
+                max_batch_nbytes = max(
+                    _device_memory_available(br) // 2, _MIN_PACK_BATCH_NBYTES
                 )
-            self._manager.shuffler.insert(
-                py_split_and_pack(
-                    table=partitioned_table,
-                    splits=list(offsets[1:-1]),
-                    stream=chunk.stream,
+                end = _batch_end(
+                    offsets,
+                    begin,
+                    max(1, num_rows * max_batch_nbytes // max(table_nbytes, 1)),
+                )
+                (batch_map,) = plc.copying.slice(
+                    gather_map, [offsets[begin], offsets[end]], stream=stream
+                )
+                # Estimated from the row count, since rows differ in size.
+                gather_nbytes = -(
+                    -table_nbytes * (offsets[end] - offsets[begin]) // max(num_rows, 1)
+                )
+                with opaque_memory_usage(
+                    await reserve_memory(context, gather_nbytes, net_memory_delta=0)
+                ):
+                    batch = plc.copying.gather(
+                        table,
+                        batch_map,
+                        plc.copying.OutOfBoundsPolicy.DONT_CHECK,
+                        stream=stream,
+                        mr=br.device_mr,
+                    )
+                reservation = await reserve_memory(
+                    context,
+                    py_split_and_pack_cost(batch, stream, br),
+                    # The batch's data moves into shuffler-owned packed buffers,
+                    # nothing lasting is added.
+                    net_memory_delta=0,
+                )
+                packed = py_split_and_pack(
+                    table=batch,
+                    splits=[offsets[i] - offsets[begin] for i in range(begin + 1, end)],
+                    stream=stream,
                     br=br,
                     reservation=reservation,
                 )
-            )
+                del batch
+                self._manager.shuffler.insert(
+                    {begin + pid: data for pid, data in packed.items()}
+                )
+                begin = end
 
         async def insert_split(self, chunk: TableChunk, splits: list[int]) -> None:
             """Split chunk at the given indices and insert into the shuffler."""
@@ -470,6 +607,54 @@ def _key_column_indices(
 def _ensure_pointwise_keys(keys: tuple[NamedExpr, ...]) -> None:
     if not all(expr.is_pointwise for expr in traversal([key.value for key in keys])):
         raise NotImplementedError("Shuffle requires pointwise key expressions.")
+
+
+# Smallest batch, in packed bytes, that `ShuffleManager.Inserter` gathers and
+# packs at a time when the device memory available for reservation is lower.
+_MIN_PACK_BATCH_NBYTES = 128 * 2**20
+
+# Device bytes per row that `hash_partition_indices` with
+# `PartitionOrder.UNSTABLE` allocates: the gather map, the partition numbers
+# and, for up to about 1536 partitions, the per-tile partition histograms.
+_HASH_PARTITION_INDICES_NBYTES_PER_ROW = 10
+
+
+def _hash_partition_indices_cost(num_rows: int) -> int:
+    """Device memory in bytes for `hash_partition_indices` over ``num_rows`` rows."""
+    return _HASH_PARTITION_INDICES_NBYTES_PER_ROW * num_rows
+
+
+def _device_memory_available(br: BufferResource) -> int:
+    """Device memory in bytes that ``br`` can reserve without spilling."""
+    return br.memory_available_for_reservation(MemoryType.DEVICE)
+
+
+def _batch_end(offsets: list[int], begin: int, max_rows: int) -> int:
+    """
+    End of the batch of consecutive partitions that starts at partition ``begin``.
+
+    The batch holds as many partitions as fit in ``max_rows`` rows, and at
+    least one.
+
+    Parameters
+    ----------
+    offsets
+        ``num_partitions + 1`` row offsets, where partition ``i`` has
+        ``offsets[i + 1] - offsets[i]`` rows.
+    begin
+        The first partition of the batch.
+    max_rows
+        The maximum number of rows of a batch of more than one partition.
+
+    Returns
+    -------
+    One past the last partition of the batch.
+    """
+    num_partitions = len(offsets) - 1
+    end = begin + 1
+    while end < num_partitions and offsets[end + 1] - offsets[begin] <= max_rows:
+        end += 1
+    return end
 
 
 def _evaluate_key_table(
